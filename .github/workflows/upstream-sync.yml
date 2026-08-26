@@ -1,0 +1,67 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'culuekbisa/sub2api'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Merge upstream/main
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/Wei-Shaw/sub2api.git
+          git fetch --prune origin main
+          git fetch --prune upstream main
+          git checkout -B main origin/main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo 'upstream/main is already contained in origin/main'
+            exit 0
+          fi
+
+          set +e
+          git merge --no-commit --no-ff upstream/main
+          merge_status=$?
+          set -e
+          if [ "$merge_status" -ne 0 ]; then
+            echo '::error title=Upstream merge conflict::upstream/main conflicts with the fork main branch'
+            conflict_files="$(git diff --name-only --diff-filter=U)"
+            if [ -z "$conflict_files" ]; then
+              conflict_files='Git reported a merge failure without unmerged paths; inspect the step log.'
+            fi
+            {
+              echo '### Upstream merge conflict'
+              echo
+              echo 'Automatic sync stopped without pushing. Resolve these paths locally, commit the result, and push `main`.'
+              echo
+              echo '```text'
+              printf '%s\n' "$conflict_files"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort || true
+            exit 1
+          fi
+
+          git commit -m 'chore(sync): merge upstream/main'
+          git push origin HEAD:main
