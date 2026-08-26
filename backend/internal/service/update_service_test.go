@@ -31,13 +31,17 @@ type updateServiceGitHubClientStub struct {
 	release        *GitHubRelease
 	recentReleases []*GitHubRelease
 	recentErr      error
+	latestRepo     string
+	recentRepo     string
 }
 
-func (s *updateServiceGitHubClientStub) FetchLatestRelease(context.Context, string) (*GitHubRelease, error) {
+func (s *updateServiceGitHubClientStub) FetchLatestRelease(_ context.Context, repo string) (*GitHubRelease, error) {
+	s.latestRepo = repo
 	return s.release, nil
 }
 
-func (s *updateServiceGitHubClientStub) FetchRecentReleases(context.Context, string, int) ([]*GitHubRelease, error) {
+func (s *updateServiceGitHubClientStub) FetchRecentReleases(_ context.Context, repo string, _ int) ([]*GitHubRelease, error) {
+	s.recentRepo = repo
 	return s.recentReleases, s.recentErr
 }
 
@@ -67,6 +71,32 @@ func TestUpdateServicePerformUpdateNoUpdateReturnsSentinel(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrNoUpdateAvailable))
 	require.ErrorIs(t, err, ErrNoUpdateAvailable)
+}
+
+func TestUpdateServiceUsesConfiguredGitHubRepository(t *testing.T) {
+	t.Setenv("UPDATE_GITHUB_REPO", "culuekbisa/sub2api")
+	client := &updateServiceGitHubClientStub{
+		release: &GitHubRelease{TagName: "v0.1.132", Name: "v0.1.132"},
+	}
+	svc := NewUpdateService(&updateServiceCacheStub{}, client, "0.1.132", "release")
+
+	_, err := svc.CheckUpdate(context.Background(), true)
+
+	require.NoError(t, err)
+	require.Equal(t, "culuekbisa/sub2api", client.latestRepo)
+}
+
+func TestUpdateServiceDefaultsToUpstreamGitHubRepository(t *testing.T) {
+	t.Setenv("UPDATE_GITHUB_REPO", "")
+	client := &updateServiceGitHubClientStub{
+		release: &GitHubRelease{TagName: "v0.1.132", Name: "v0.1.132"},
+	}
+	svc := NewUpdateService(&updateServiceCacheStub{}, client, "0.1.132", "release")
+
+	_, err := svc.CheckUpdate(context.Background(), true)
+
+	require.NoError(t, err)
+	require.Equal(t, "Wei-Shaw/sub2api", client.latestRepo)
 }
 
 func newRollbackTestService(current string, releases []*GitHubRelease) *UpdateService {

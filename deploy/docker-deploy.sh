@@ -21,7 +21,12 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # GitHub raw content base URL
-GITHUB_RAW_URL="https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy"
+GITHUB_REPO="${SUB2API_GITHUB_REPO:-Wei-Shaw/sub2api}"
+if [[ ! "$GITHUB_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "Error: SUB2API_GITHUB_REPO must use OWNER/REPO format." >&2
+    exit 1
+fi
+GITHUB_RAW_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/deploy"
 
 # Print colored message
 print_info() {
@@ -114,11 +119,13 @@ main() {
         sed -i "s/^JWT_SECRET=.*/JWT_SECRET=${JWT_SECRET}/" .env
         sed -i "s/^TOTP_ENCRYPTION_KEY=.*/TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY}/" .env
         sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=${POSTGRES_PASSWORD}/" .env
+        sed -i "s|^UPDATE_GITHUB_REPO=.*|UPDATE_GITHUB_REPO=${GITHUB_REPO}|" .env
     else
         # BSD sed (macOS)
         sed -i '' "s/^JWT_SECRET=.*/JWT_SECRET=${JWT_SECRET}/" .env
         sed -i '' "s/^TOTP_ENCRYPTION_KEY=.*/TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY}/" .env
         sed -i '' "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=${POSTGRES_PASSWORD}/" .env
+        sed -i '' "s|^UPDATE_GITHUB_REPO=.*|UPDATE_GITHUB_REPO=${GITHUB_REPO}|" .env
     fi
 
     # Create data directories
