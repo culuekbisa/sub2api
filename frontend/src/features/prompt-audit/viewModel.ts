@@ -7,6 +7,7 @@ import type {
 } from './types'
 
 export const DEFAULT_GUARD_MODEL = 'sileader/qwen3guard:0.6b'
+export const CUSTOM_POLICY_CATEGORY = 'custom_policy'
 
 export const SCANNER_CATALOG = [
   { id: 'violent', label: 'Violent' },
@@ -30,6 +31,8 @@ export function cloneData<T>(value: T): T {
 export function configToDraft(config: PromptAuditConfig): PromptAuditDraft {
   return {
     ...cloneData(config),
+    engine_mode: config.engine_mode || 'qwen3guard',
+    system_prompt: config.system_prompt || '',
     group_ids: [...(config.group_ids ?? [])],
     scanners: [...(config.scanners ?? [])],
     endpoints: (config.endpoints ?? []).map((endpoint) => ({
@@ -64,6 +67,8 @@ export function buildUpdateRequest(draft: PromptAuditDraft): PromptAuditUpdateRe
     blocking_enabled: draft.enabled && draft.blocking_enabled,
     blocking_latest_turn_only: draft.blocking_latest_turn_only,
     store_pass_events: draft.store_pass_events,
+    engine_mode: draft.engine_mode,
+    system_prompt: draft.system_prompt,
     strategy: 'priority',
     worker_count: Number(draft.worker_count),
     queue_capacity: Number(draft.queue_capacity),

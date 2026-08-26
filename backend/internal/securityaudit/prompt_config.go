@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
@@ -68,6 +69,8 @@ type storageConfig struct {
 	BlockingEnabled        bool              `json:"blocking_enabled"`
 	BlockingLatestTurnOnly bool              `json:"blocking_latest_turn_only"`
 	StorePassEvents        bool              `json:"store_pass_events"`
+	EngineMode             string            `json:"engine_mode"`
+	SystemPrompt           string            `json:"system_prompt"`
 	Strategy               string            `json:"strategy"`
 	WorkerCount            int               `json:"worker_count"`
 	QueueCapacity          int               `json:"queue_capacity"`
@@ -82,15 +85,17 @@ type storageConfig struct {
 }
 
 type ActiveEndpoint struct {
-	ID         string
-	Name       string
-	Protocol   string
-	BaseURL    string
-	Model      string
-	Token      string
-	TimeoutMS  int
-	InputLimit int
-	Enabled    bool
+	ID           string
+	Name         string
+	Protocol     string
+	BaseURL      string
+	Model        string
+	EngineMode   string
+	SystemPrompt string
+	Token        string
+	TimeoutMS    int
+	InputLimit   int
+	Enabled      bool
 	// TokenInvalid marks an endpoint whose persisted token ciphertext cannot be
 	// decrypted with the current encryption key (key changed or auto-generated
 	// on restart). The endpoint is kept visible for admins but excluded from
@@ -104,6 +109,8 @@ type ActiveConfig struct {
 	BlockingEnabled        bool
 	BlockingLatestTurnOnly bool
 	StorePassEvents        bool
+	EngineMode             string
+	SystemPrompt           string
 	Strategy               string
 	WorkerCount            int
 	QueueCapacity          int
@@ -135,6 +142,8 @@ type PublicConfig struct {
 	BlockingEnabled        bool             `json:"blocking_enabled"`
 	BlockingLatestTurnOnly bool             `json:"blocking_latest_turn_only"`
 	StorePassEvents        bool             `json:"store_pass_events"`
+	EngineMode             string           `json:"engine_mode"`
+	SystemPrompt           string           `json:"system_prompt"`
 	EffectiveMode          Mode             `json:"effective_mode"`
 	Strategy               string           `json:"strategy"`
 	WorkerCount            int              `json:"worker_count"`
@@ -168,6 +177,8 @@ type UpdateConfigRequest struct {
 	BlockingEnabled        bool             `json:"blocking_enabled"`
 	BlockingLatestTurnOnly bool             `json:"blocking_latest_turn_only"`
 	StorePassEvents        bool             `json:"store_pass_events"`
+	EngineMode             string           `json:"engine_mode"`
+	SystemPrompt           string           `json:"system_prompt"`
 	Strategy               string           `json:"strategy"`
 	WorkerCount            int              `json:"worker_count"`
 	QueueCapacity          int              `json:"queue_capacity"`
@@ -183,6 +194,8 @@ func DefaultStorageConfig() storageConfig {
 		BlockingEnabled:        false,
 		BlockingLatestTurnOnly: false,
 		StorePassEvents:        false,
+		EngineMode:             EngineModeQwen3Guard,
+		SystemPrompt:           DefaultSystemPrompt,
 		Strategy:               "priority",
 		WorkerCount:            DefaultWorkerCount,
 		QueueCapacity:          DefaultQueueCapacity,
@@ -225,6 +238,12 @@ func normalizeStorageConfig(cfg *storageConfig) {
 	if cfg.QueueCapacity == 0 {
 		cfg.QueueCapacity = DefaultQueueCapacity
 	}
+	if strings.TrimSpace(cfg.EngineMode) == "" {
+		cfg.EngineMode = EngineModeQwen3Guard
+	}
+	if strings.TrimSpace(cfg.SystemPrompt) == "" {
+		cfg.SystemPrompt = DefaultSystemPrompt
+	}
 	if len(cfg.Scanners) == 0 {
 		cfg.Scanners = append([]string(nil), AllScannerIDs...)
 	}
@@ -255,6 +274,12 @@ func normalizeStorageConfig(cfg *storageConfig) {
 }
 
 func validateStorageConfig(cfg storageConfig) error {
+	if cfg.EngineMode != EngineModeQwen3Guard && cfg.EngineMode != EngineModeCustomJSON {
+		return infraerrors.BadRequest("prompt_audit_invalid_engine_mode", "提示词审计引擎模式无效")
+	}
+	if utf8.RuneCountInString(cfg.SystemPrompt) > MaxSystemPromptRunes {
+		return infraerrors.BadRequest("prompt_audit_invalid_system_prompt", "提示词审计系统提示词过长")
+	}
 	if cfg.BlockingEnabled && !cfg.Enabled {
 		return infraerrors.BadRequest(ErrorCodeRequiresEnabled, "开启同步阻止前必须先启用提示词审计")
 	}
@@ -306,6 +331,13 @@ func validateStorageConfig(cfg storageConfig) error {
 }
 
 func validateUpdateConfigRequest(req UpdateConfigRequest) error {
+	req = normalizeUpdateConfigRequest(req)
+	if req.EngineMode != EngineModeQwen3Guard && req.EngineMode != EngineModeCustomJSON {
+		return infraerrors.BadRequest("prompt_audit_invalid_engine_mode", "提示词审计引擎模式无效")
+	}
+	if utf8.RuneCountInString(req.SystemPrompt) > MaxSystemPromptRunes {
+		return infraerrors.BadRequest("prompt_audit_invalid_system_prompt", "提示词审计系统提示词过长")
+	}
 	if strings.TrimSpace(req.Strategy) != "priority" {
 		return infraerrors.BadRequest("prompt_audit_invalid_strategy", "提示词审计策略仅支持 priority")
 	}
@@ -319,7 +351,7 @@ func validateUpdateConfigRequest(req UpdateConfigRequest) error {
 		return infraerrors.BadRequest("prompt_audit_scanners_required", "至少需要启用一个风险分类")
 	}
 	for _, scanner := range req.Scanners {
-		if _, ok := ScannerCatalog[NormalizeCategory(scanner)]; !ok {
+		if !isConfigurableScannerID(NormalizeCategory(scanner)) {
 			return infraerrors.BadRequest("prompt_audit_invalid_scanner", "提示词审计风险分类无效")
 		}
 	}
@@ -342,6 +374,16 @@ func validateUpdateConfigRequest(req UpdateConfigRequest) error {
 		}
 	}
 	return nil
+}
+
+func normalizeUpdateConfigRequest(req UpdateConfigRequest) UpdateConfigRequest {
+	if strings.TrimSpace(req.EngineMode) == "" {
+		req.EngineMode = EngineModeQwen3Guard
+	}
+	if strings.TrimSpace(req.SystemPrompt) == "" {
+		req.SystemPrompt = DefaultSystemPrompt
+	}
+	return req
 }
 
 func (cfg ActiveConfig) EffectiveMode() Mode {
@@ -413,6 +455,7 @@ func PublicFromStorage(cfg storageConfig, riskControlEnabled bool, invalidTokenE
 	active := ActiveConfig{RiskControlEnabled: riskControlEnabled, Enabled: cfg.Enabled, BlockingEnabled: cfg.BlockingEnabled}
 	return PublicConfig{
 		Enabled: cfg.Enabled, BlockingEnabled: cfg.BlockingEnabled, BlockingLatestTurnOnly: cfg.BlockingLatestTurnOnly, StorePassEvents: cfg.StorePassEvents,
+		EngineMode: cfg.EngineMode, SystemPrompt: cfg.SystemPrompt,
 		EffectiveMode: active.EffectiveMode(), Strategy: cfg.Strategy, WorkerCount: cfg.WorkerCount,
 		QueueCapacity: cfg.QueueCapacity, Scanners: scanners, AllGroups: cfg.AllGroups,
 		GroupIDs: groupIDs, Endpoints: endpoints, ConfigVersion: cfg.ConfigVersion,
@@ -424,7 +467,8 @@ func ActiveFromStorage(cfg storageConfig, riskControlEnabled bool, encryptor Sec
 	active := ActiveConfig{
 		RiskControlEnabled: riskControlEnabled, Enabled: cfg.Enabled, BlockingEnabled: cfg.BlockingEnabled,
 		BlockingLatestTurnOnly: cfg.BlockingLatestTurnOnly,
-		StorePassEvents:        cfg.StorePassEvents, Strategy: cfg.Strategy, WorkerCount: cfg.WorkerCount,
+		StorePassEvents:        cfg.StorePassEvents, EngineMode: cfg.EngineMode, SystemPrompt: cfg.SystemPrompt,
+		Strategy: cfg.Strategy, WorkerCount: cfg.WorkerCount,
 		QueueCapacity: cfg.QueueCapacity, Scanners: append([]string(nil), cfg.Scanners...), AllGroups: cfg.AllGroups,
 		GroupIDs: append([]int64(nil), cfg.GroupIDs...), ConfigVersion: cfg.ConfigVersion,
 		UpdatedAt: cfg.UpdatedAt, UpdatedBy: cfg.UpdatedBy, ChangeSummary: cfg.ChangeSummary,
@@ -451,6 +495,7 @@ func ActiveFromStorage(cfg storageConfig, riskControlEnabled bool, encryptor Sec
 		}
 		active.Endpoints = append(active.Endpoints, ActiveEndpoint{
 			ID: ep.ID, Name: ep.Name, Protocol: ep.Protocol, BaseURL: ep.BaseURL, Model: ep.Model,
+			EngineMode: cfg.EngineMode, SystemPrompt: cfg.SystemPrompt,
 			Token: token, TimeoutMS: ep.TimeoutMS, InputLimit: ep.InputLimit,
 			Enabled: ep.Enabled && !tokenInvalid, TokenInvalid: tokenInvalid,
 		})
@@ -464,15 +509,23 @@ func changeSummary(cfg storageConfig) string {
 		BlockingEnabled        bool   `json:"blocking_enabled"`
 		BlockingLatestTurnOnly bool   `json:"blocking_latest_turn_only"`
 		StorePassEvents        bool   `json:"store_pass_events"`
+		EngineMode             string `json:"engine_mode"`
+		SystemPromptHash       string `json:"system_prompt_hash"`
 		EndpointCount          int    `json:"endpoint_count"`
 		ScannerCount           int    `json:"scanner_count"`
 		AllGroups              bool   `json:"all_groups"`
 		GroupCount             int    `json:"group_count"`
 		GroupHash              string `json:"group_hash"`
-	}{cfg.Enabled, cfg.BlockingEnabled, cfg.BlockingLatestTurnOnly, cfg.StorePassEvents, len(cfg.Endpoints), len(cfg.Scanners), cfg.AllGroups, len(cfg.GroupIDs), ""}
+	}{
+		Enabled: cfg.Enabled, BlockingEnabled: cfg.BlockingEnabled, BlockingLatestTurnOnly: cfg.BlockingLatestTurnOnly,
+		StorePassEvents: cfg.StorePassEvents, EngineMode: cfg.EngineMode, EndpointCount: len(cfg.Endpoints),
+		ScannerCount: len(cfg.Scanners), AllGroups: cfg.AllGroups, GroupCount: len(cfg.GroupIDs),
+	}
 	rawGroups, _ := json.Marshal(cfg.GroupIDs)
 	digest := sha256.Sum256(rawGroups)
 	summary.GroupHash = hex.EncodeToString(digest[:])
+	promptDigest := sha256.Sum256([]byte(cfg.SystemPrompt))
+	summary.SystemPromptHash = hex.EncodeToString(promptDigest[:])
 	raw, _ := json.Marshal(summary)
 	return string(raw)
 }
@@ -509,4 +562,13 @@ func canonicalScannerIDs(values []string) []string {
 		}
 	}
 	return result
+}
+
+func isConfigurableScannerID(id string) bool {
+	for _, scannerID := range AllScannerIDs {
+		if scannerID == id {
+			return true
+		}
+	}
+	return false
 }

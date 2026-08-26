@@ -1,4 +1,5 @@
 export type PromptAuditMode = 'off' | 'async_audit' | 'blocking'
+export type PromptAuditEngineMode = 'qwen3guard' | 'custom_json'
 export type PromptDecision = 'pass' | 'flag' | 'critical'
 export type PromptRiskLevel = 'low' | 'medium' | 'high' | 'critical'
 
@@ -25,6 +26,8 @@ export interface PromptAuditConfig {
   blocking_enabled: boolean
   blocking_latest_turn_only: boolean
   store_pass_events: boolean
+  engine_mode: PromptAuditEngineMode
+  system_prompt: string
   effective_mode: PromptAuditMode
   strategy: 'priority'
   worker_count: number
@@ -49,6 +52,8 @@ export interface PromptAuditUpdateRequest {
   blocking_enabled: boolean
   blocking_latest_turn_only: boolean
   store_pass_events: boolean
+  engine_mode: PromptAuditEngineMode
+  system_prompt: string
   strategy: 'priority'
   worker_count: number
   queue_capacity: number
