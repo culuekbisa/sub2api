@@ -64,7 +64,8 @@ release:
     owner: "{{ .Env.GITHUB_REPO_OWNER }}"
     name: "{{ .Env.GITHUB_REPO_NAME }}"
   draft: false
-  prerelease: auto
+  # Keep fork revisions discoverable through GitHub's latest release API.
+  prerelease: false
   name_template: "Sub2API {{.Version}} (Simple)"
   # 跳过上传二进制包
   skip_upload: true

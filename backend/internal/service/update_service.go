@@ -647,30 +647,55 @@ func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 	_ = s.cache.SetUpdateInfo(ctx, string(data), time.Duration(updateCacheTTL)*time.Second)
 }
 
-// compareVersions compares two semantic versions
+// compareVersions compares the upstream semantic version and the optional
+// fork revision. A plain upstream version is revision zero, so a fork build
+// such as 0.1.183-fork.1 is newer than 0.1.183 without changing the upstream
+// base version shown to operators.
 func compareVersions(current, latest string) int {
 	currentParts := parseVersion(current)
 	latestParts := parseVersion(latest)
 
 	for i := 0; i < 3; i++ {
-		if currentParts[i] < latestParts[i] {
+		if currentParts.core[i] < latestParts.core[i] {
 			return -1
 		}
-		if currentParts[i] > latestParts[i] {
+		if currentParts.core[i] > latestParts.core[i] {
 			return 1
 		}
+	}
+	if currentParts.forkRevision < latestParts.forkRevision {
+		return -1
+	}
+	if currentParts.forkRevision > latestParts.forkRevision {
+		return 1
 	}
 	return 0
 }
 
-func parseVersion(v string) [3]int {
-	v = strings.TrimPrefix(v, "v")
-	parts := strings.Split(v, ".")
-	result := [3]int{0, 0, 0}
-	for i := 0; i < len(parts) && i < 3; i++ {
+type comparableVersion struct {
+	core         [3]int
+	forkRevision int
+}
+
+func parseVersion(v string) comparableVersion {
+	v = strings.TrimSpace(strings.TrimPrefix(v, "v"))
+	coreAndSuffix := strings.SplitN(v, "-", 2)
+	parts := strings.Split(coreAndSuffix[0], ".")
+	result := comparableVersion{}
+	for i := 0; i < len(parts) && i < len(result.core); i++ {
 		if parsed, err := strconv.Atoi(parts[i]); err == nil {
-			result[i] = parsed
+			result.core[i] = parsed
 		}
 	}
+
+	if len(coreAndSuffix) == 2 {
+		suffixParts := strings.Split(coreAndSuffix[1], ".")
+		if len(suffixParts) >= 2 && strings.EqualFold(suffixParts[0], "fork") {
+			if parsed, err := strconv.Atoi(suffixParts[1]); err == nil && parsed >= 0 {
+				result.forkRevision = parsed
+			}
+		}
+	}
+
 	return result
 }

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g., v1.0.0)'
+        description: 'Tag to release (e.g., v0.1.183-fork.1)'
         required: true
         type: string
       simple_release:
@@ -291,16 +291,20 @@ jobs:
             VERSION=${GITHUB_REF#refs/tags/v}
           fi
 
+          # Keep the default branch on the upstream baseline version. Release
+          # artifacts retain the full fork identifier, such as 0.1.184-fork.1.
+          BASE_VERSION="${VERSION%%-fork.*}"
+
           CURRENT_VERSION=$(tr -d '\r\n' < backend/cmd/server/VERSION || true)
-          if [ "$CURRENT_VERSION" = "$VERSION" ]; then
-            echo "VERSION file already matches $VERSION"
+          if [ "$CURRENT_VERSION" = "$BASE_VERSION" ]; then
+            echo "VERSION file already matches upstream baseline $BASE_VERSION"
             exit 0
           fi
 
-          echo "$VERSION" > backend/cmd/server/VERSION
+          echo "$BASE_VERSION" > backend/cmd/server/VERSION
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add backend/cmd/server/VERSION
-          git commit -m "chore: sync VERSION to ${VERSION} [skip ci]"
+          git commit -m "chore: sync VERSION to ${BASE_VERSION} [skip ci]"
           git push origin HEAD:${{ github.event.repository.default_branch }}

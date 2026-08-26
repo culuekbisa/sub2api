@@ -437,6 +437,8 @@ docker compose -f docker-compose.local.yml up -d
 
 如果运行的是自建 Fork，请在 `.env` 中设置 `UPDATE_GITHUB_REPO=culuekbisa/sub2api`，并使用包含该配置的二开镜像。后台“检测更新”读取目标仓库的 GitHub Release；Fork 需要先发布带有平台安装包和 `checksums.txt` 的 Release。
 
+二开版本使用 `v<上游版本>-fork.<修订号>` 格式，例如 `v0.1.184-fork.1`。这样可以保留上游版本基线，同时让更新器按二开修订号识别新版本；普通 `v0.1.184` 会被视为同一上游基线的修订号 `0`。
+
 #### 轻松迁移（本地目录版）
 
 使用 `docker-compose.local.yml` 时，可以轻松迁移到新服务器：

@@ -99,6 +99,46 @@ func TestUpdateServiceDefaultsToUpstreamGitHubRepository(t *testing.T) {
 	require.Equal(t, "Wei-Shaw/sub2api", client.latestRepo)
 }
 
+func TestCompareVersionsOrdersForkRevisionsAfterUpstreamBase(t *testing.T) {
+	tests := []struct {
+		name    string
+		current string
+		latest  string
+		want    int
+	}{
+		{
+			name:    "fork revision is newer than upstream base",
+			current: "0.1.183",
+			latest:  "0.1.183-fork.1",
+			want:    -1,
+		},
+		{
+			name:    "fork revisions compare numerically",
+			current: "0.1.183-fork.1",
+			latest:  "0.1.183-fork.2",
+			want:    -1,
+		},
+		{
+			name:    "upstream patch still outranks fork revision",
+			current: "0.1.183-fork.9",
+			latest:  "0.1.184-fork.1",
+			want:    -1,
+		},
+		{
+			name:    "same fork revision is equal",
+			current: "v0.1.183-fork.1",
+			latest:  "0.1.183-fork.1",
+			want:    0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, compareVersions(tt.current, tt.latest))
+		})
+	}
+}
+
 func newRollbackTestService(current string, releases []*GitHubRelease) *UpdateService {
 	return NewUpdateService(
 		&updateServiceCacheStub{},

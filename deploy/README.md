@@ -245,6 +245,8 @@ docker compose down -v
 | `GEMINI_OAUTH_SCOPES` | No | *(default)* | OAuth scopes (Gemini OAuth) |
 | `GEMINI_QUOTA_POLICY` | No | *(empty)* | JSON overrides for Gemini local quota simulation (Code Assist only). |
 
+Fork release tags should use `v<upstream-version>-fork.<revision>`, for example `v0.1.184-fork.1`. The updater keeps the upstream baseline visible and compares the fork revision separately.
+
 See `.env.example` for all available options.
 
 > **Note:** The `docker-deploy.sh` script automatically generates `JWT_SECRET`, `TOTP_ENCRYPTION_KEY`, and `POSTGRES_PASSWORD` for you.
