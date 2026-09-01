@@ -25,6 +25,7 @@ jobs:
           ref: main
 
       - name: Merge upstream/main
+        id: merge
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -37,6 +38,7 @@ jobs:
 
           if git merge-base --is-ancestor upstream/main HEAD; then
             echo 'upstream/main is already contained in origin/main'
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -65,3 +67,49 @@ jobs:
 
           git commit -m 'chore(sync): merge upstream/main'
           git push origin HEAD:main
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+      - name: Bump fork release tag
+        if: steps.merge.outputs.has_changes == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+
+          # Upstream baseline version embedded at build time (no leading 'v').
+          BASE_VERSION="$(tr -d '\r\n' < backend/cmd/server/VERSION)"
+          if [ -z "$BASE_VERSION" ]; then
+            echo '::error::Could not read backend/cmd/server/VERSION; skipping fork tag'
+            exit 1
+          fi
+          BASE_VERSION="${BASE_VERSION#v}"
+          echo "base_version=$BASE_VERSION"
+
+          # Re-fetch + list existing fork tags for this baseline.
+          git fetch --tags origin
+          echo "existing tags for $BASE_VERSION:"
+          git ls-remote --tags origin "refs/tags/v${BASE_VERSION}-fork.*" "$BASE_VERSION" | grep -oE "v${BASE_VERSION}-fork\.[0-9]+$" | sort -V || true
+
+          next_rev=1
+          latest_rev=$(git ls-remote --tags origin "refs/tags/v${BASE_VERSION}-fork.*" \
+            | grep -oE "v${BASE_VERSION}-fork\.[0-9]+$" \
+            | sed "s/^v${BASE_VERSION}-fork\.//" \
+            | sort -n \
+            | tail -1 || true)
+          if [ -n "$latest_rev" ]; then
+            next_rev=$((latest_rev + 1))
+          fi
+
+          TAG="v${BASE_VERSION}-fork.${next_rev}"
+          echo "next_tag=$TAG"
+
+          # Same-tag guard in case a previous run raced ahead.
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "refs/tags/${TAG}$"; then
+            echo "::warning::Tag $TAG already exists; skipping bump"
+            exit 0
+          fi
+
+          git tag -a "$TAG" -m "chore(release): fork build ${TAG}"
+          git push origin "$TAG"
+          echo "pushed tag: $TAG"
