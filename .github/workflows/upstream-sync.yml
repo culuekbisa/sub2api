@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: upstream-sync
@@ -70,6 +71,7 @@ jobs:
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
 
       - name: Bump fork release tag
+        id: bump
         if: steps.merge.outputs.has_changes == 'true'
         shell: bash
         env:
@@ -107,9 +109,22 @@ jobs:
           # Same-tag guard in case a previous run raced ahead.
           if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "refs/tags/${TAG}$"; then
             echo "::warning::Tag $TAG already exists; skipping bump"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           git tag -a "$TAG" -m "chore(release): fork build ${TAG}"
           git push origin "$TAG"
           echo "pushed tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger fork release workflow
+        if: steps.merge.outputs.has_changes == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          TAG="${{ steps.bump.outputs.tag }}"
+          echo "dispatching Release for $TAG"
+          gh workflow run release.yml --ref main -f "tag=$TAG"
