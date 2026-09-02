@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional existing fork tag to (re)dispatch Release for'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -119,12 +124,21 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Trigger fork release workflow
-        if: steps.merge.outputs.has_changes == 'true'
+        if: steps.merge.outputs.has_changes == 'true' || inputs.release_tag != ''
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BUMPED_TAG: ${{ steps.bump.outputs.tag }}
         run: |
           set -Eeuo pipefail
-          TAG="${{ steps.bump.outputs.tag }}"
-          echo "dispatching Release for $TAG"
-          gh workflow run release.yml --ref main -f "tag=$TAG"
+          TAG="${RELEASE_TAG:-$BUMPED_TAG}"
+          if [ -z "$TAG" ]; then
+            echo '::error::No release tag was provided or generated'
+            exit 1
+          fi
+          echo "dispatching Release for $TAG in $GITHUB_REPOSITORY"
+          gh workflow run release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f "tag=$TAG"
