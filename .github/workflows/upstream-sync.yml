@@ -45,7 +45,31 @@ jobs:
           if git merge-base --is-ancestor upstream/main HEAD; then
             echo 'upstream/main is already contained in origin/main'
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "version_changed=false" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+
+          # Compare the VERSION at the last shared upstream commit with the
+          # current upstream/main VERSION. This detects upstream version bumps
+          # only, while ignoring README/docs/CI-only upstream commits.
+          MERGE_BASE="$(git merge-base origin/main upstream/main)"
+          PREVIOUS_VERSION="$(git show "${MERGE_BASE}:backend/cmd/server/VERSION" | tr -d '\r\n')"
+          UPSTREAM_VERSION="$(git show "upstream/main:backend/cmd/server/VERSION" | tr -d '\r\n')"
+
+          if [ -z "$PREVIOUS_VERSION" ] || [ -z "$UPSTREAM_VERSION" ]; then
+            echo '::error::Could not read upstream VERSION before/after sync'
+            exit 1
+          fi
+
+          PREVIOUS_VERSION="${PREVIOUS_VERSION#v}"
+          UPSTREAM_VERSION="${UPSTREAM_VERSION#v}"
+          echo "previous_upstream_version=$PREVIOUS_VERSION"
+          echo "upstream_version=$UPSTREAM_VERSION"
+
+          if [ "$PREVIOUS_VERSION" = "$UPSTREAM_VERSION" ]; then
+            VERSION_CHANGED=false
+          else
+            VERSION_CHANGED=true
           fi
 
           set +e
@@ -74,10 +98,24 @@ jobs:
           git commit -m 'chore(sync): merge upstream/main'
           git push origin HEAD:main
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          echo "version_changed=$VERSION_CHANGED" >> "$GITHUB_OUTPUT"
+          echo "upstream_version=$UPSTREAM_VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Bump fork release tag
+          if [ "$VERSION_CHANGED" = 'true' ]; then
+            echo "Upstream VERSION changed: $PREVIOUS_VERSION -> $UPSTREAM_VERSION"
+          else
+            echo "Upstream synced; VERSION unchanged at $UPSTREAM_VERSION, so no fork tag will be created"
+            {
+              echo '### Upstream synced without release'
+              echo
+              echo "Upstream changes were merged, but \`VERSION\` remains \`$UPSTREAM_VERSION\`."
+              echo 'No fork tag or Release was created.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Create fork release tag
         id: bump
-        if: steps.merge.outputs.has_changes == 'true'
+        if: steps.merge.outputs.version_changed == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -96,7 +134,7 @@ jobs:
           # Re-fetch + list existing fork tags for this baseline.
           git fetch --tags origin
           echo "existing tags for $BASE_VERSION:"
-          git ls-remote --tags origin "refs/tags/v${BASE_VERSION}-fork.*" "$BASE_VERSION" | grep -oE "v${BASE_VERSION}-fork\.[0-9]+$" | sort -V || true
+          git ls-remote --tags origin "refs/tags/v${BASE_VERSION}-fork.*" | grep -oE "v${BASE_VERSION}-fork\.[0-9]+$" | sort -V || true
 
           next_rev=1
           latest_rev=$(git ls-remote --tags origin "refs/tags/v${BASE_VERSION}-fork.*" \
@@ -124,7 +162,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Trigger fork release workflow
-        if: steps.merge.outputs.has_changes == 'true' || inputs.release_tag != ''
+        if: steps.merge.outputs.version_changed == 'true' || inputs.release_tag != ''
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
