@@ -10,12 +10,14 @@ def replace_once(path: str, old: str, new: str) -> None:
 
 
 # The early Plus hardening commits were written on top of Plus-only Live/IP hook
-# infrastructure and intermediate WS lifecycle assertions that were later
-# superseded. Keep those shared files out of historical patch replay and adapt
-# only the security-audit boundary to the current v0.2.2 implementation.
+# infrastructure and intermediate WS/image observability assertions that were
+# later superseded or belong to non-risk-control subsystems. Keep those shared
+# files out of historical patch replay and adapt only the security-audit boundary
+# to the current v0.2.2 implementation.
 script = Path('.github/scripts/port-plus-risk.sh')
 text = script.read_text()
 for line in (
+    '  backend/internal/handler/image_task_handler.go\n',
     '  backend/internal/handler/openai_gateway_handler.go\n',
     '  backend/internal/handler/openai_live.go\n',
     '  backend/internal/handler/openai_live_test.go\n',
