@@ -47,105 +47,185 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git remote add lucky https://github.com/LuckyKuang/sub2api-plus.git
           git fetch --no-tags lucky main
-
           test "$(tr -d '\r\n' < backend/cmd/server/VERSION)" = '0.2.2'
+
           SHARED_BASE="$(git merge-base HEAD lucky/main)"
           echo "shared base: $SHARED_BASE"
 
-          git diff --name-only "$SHARED_BASE" lucky/main > /tmp/lucky-changed.txt
-          : > /tmp/risk-files.txt
+          # Feature-owned files: use Lucky's CURRENT final implementation rather
+          # than replaying its intermediate history. Abort if upstream v0.2.2 also
+          # changed one of these paths; such a file requires explicit adaptation.
+          OWNED_PATHS=(
+            backend/internal/auditcontent
+            backend/internal/securityaudit
+            backend/internal/service/content_moderation.go
+            backend/internal/service/content_moderation_input.go
+            backend/internal/service/content_moderation_input_test.go
+            backend/internal/service/content_moderation_proxy_test.go
+            backend/internal/service/content_moderation_runtime_cache_test.go
+            backend/internal/service/content_moderation_session_block.go
+            backend/internal/service/content_moderation_session_block_test.go
+            backend/internal/service/content_moderation_test.go
+            backend/internal/service/content_moderation_cyber_test.go
+            backend/internal/repository/content_moderation_hash_cache.go
+            backend/internal/repository/content_moderation_hash_cache_test.go
+            backend/internal/repository/content_moderation_repo.go
+            backend/internal/repository/content_moderation_repo_test.go
+            backend/internal/repository/content_moderation_session_block_repo.go
+            backend/internal/handler/admin/content_moderation_handler.go
+            backend/internal/handler/content_moderation_helper.go
+            backend/internal/handler/security_audit_content_contract_test.go
+            backend/internal/handler/security_audit_errors.go
+            backend/internal/handler/security_audit_errors_test.go
+            backend/internal/handler/security_audit_helper.go
+            backend/internal/handler/security_audit_helper_test.go
+            backend/internal/handler/security_audit_media_submit_test.go
+            backend/internal/handler/security_audit_order_test.go
+            backend/internal/server/routes/prompt_audit_route_coverage_test.go
+            backend/migrations/content_moderation_input_content_migration_test.go
+            backend/migrations/content_moderation_session_blocks_migration_test.go
+            backend/migrations/content_moderation_session_blocks_unique_migration_test.go
+            docs/SECURITY_AUDIT_CONTENT_COVERAGE.md
+            frontend/src/api/admin/riskControl.ts
+            frontend/src/features/prompt-audit
+            frontend/src/i18n/locales/en/admin/promptAudit.ts
+            frontend/src/i18n/locales/zh/admin/promptAudit.ts
+            frontend/src/views/admin/RiskControlView.vue
+            frontend/src/views/admin/__tests__/RiskControlView.spec.ts
+          )
 
-          # Select every final Lucky change whose path or diff actually belongs to
-          # Security Audit / Prompt Audit / Content Moderation. This catches the
-          # obvious feature-owned files and thin integration hunks in shared files.
-          while IFS= read -r file; do
-            [ -n "$file" ] || continue
-            case "$file" in
-              backend/internal/auditcontent/*|backend/internal/securityaudit/*|backend/internal/service/content_moderation*.go|backend/internal/repository/content_moderation*.go|backend/internal/handler/admin/content_moderation*.go|backend/internal/handler/content_moderation*.go|backend/internal/handler/security_audit*.go|backend/internal/handler/openai_live*.go|frontend/src/features/prompt-audit/*|frontend/src/*/risk-control/*|frontend/src/*/prompt-audit/*|docs/SECURITY_AUDIT_CONTENT_COVERAGE.md)
-                echo "$file" >> /tmp/risk-files.txt
-                continue
-                ;;
-            esac
-            if git diff "$SHARED_BASE" lucky/main -- "$file" | grep -Eq 'ContentModeration|content_moderation|securityaudit|SecurityAudit|security_audit|PromptAudit|prompt_audit|prompt-audit|risk_control|risk-control|SessionBlock|session_block|CyberPolicyAutoBan'; then
-              echo "$file" >> /tmp/risk-files.txt
+          for path in "${OWNED_PATHS[@]}"; do
+            if ! git diff --quiet "$SHARED_BASE" HEAD -- "$path"; then
+              echo "::error title=Owned risk path changed in v0.2.2::$path"
+              git diff --stat "$SHARED_BASE" HEAD -- "$path"
+              exit 1
             fi
-          done < /tmp/lucky-changed.txt
-          sort -u -o /tmp/risk-files.txt /tmp/risk-files.txt
-
-          echo 'Selected final risk-control files:'
-          cat /tmp/risk-files.txt
-
-          # SQL migrations are copied separately so custom migration numbers can
-          # never collide with the newer v0.2.2 migration chain.
-          grep '^backend/migrations/.*\.sql$' /tmp/risk-files.txt > /tmp/risk-migrations.txt || true
-          grep -v '^backend/migrations/.*\.sql$' /tmp/risk-files.txt > /tmp/risk-non-migrations.txt || true
-
-          # Apply one final-state delta per shared file. Risk-owned files that the
-          # v0.2.2 line never touched can be taken verbatim from Lucky current main.
-          # Files changed by both sides get a real three-way merge from the common
-          # ancestor, preserving upstream 0.2.2 changes instead of downgrading them.
-          while IFS= read -r file; do
-            [ -n "$file" ] || continue
-            if git diff --quiet "$SHARED_BASE" HEAD -- "$file"; then
-              if git cat-file -e "lucky/main:$file" 2>/dev/null; then
-                echo "final-copy: $file"
-                git checkout lucky/main -- "$file"
-              elif [ -e "$file" ]; then
-                git rm -- "$file"
-              fi
-              continue
+            if git cat-file -e "lucky/main:$path" 2>/dev/null; then
+              echo "final-copy owned: $path"
+              git checkout lucky/main -- "$path"
             fi
+          done
 
-            patch="/tmp/final-$(echo "$file" | tr '/ ' '__').patch"
-            git diff --binary "$SHARED_BASE" lucky/main -- "$file" > "$patch"
-            [ -s "$patch" ] || continue
-            echo "three-way adapt: $file"
+          # Shared integration surfaces are never copied wholesale from Plus.
+          # Replay only the known risk-control commits on these paths, preserving
+          # all unrelated v0.2.2 changes in gateway/settings/router/wiring files.
+          SHARED_PATHS=(
+            backend/cmd/server/wire.go
+            backend/internal/handler/admin/setting_handler.go
+            backend/internal/handler/admin/setting_handler_audit.go
+            backend/internal/handler/admin/setting_handler_update.go
+            backend/internal/handler/dto/settings.go
+            backend/internal/handler/gateway_handler.go
+            backend/internal/handler/handler.go
+            backend/internal/handler/image_task_handler.go
+            backend/internal/handler/openai_gateway_handler.go
+            backend/internal/handler/openai_gateway_handler_test.go
+            backend/internal/handler/openai_live.go
+            backend/internal/handler/openai_live_test.go
+            backend/internal/handler/wire.go
+            backend/internal/repository/gateway_cache.go
+            backend/internal/server/api_contract_test.go
+            backend/internal/server/middleware/audit_log.go
+            backend/internal/server/middleware/audit_log_test.go
+            backend/internal/server/routes/admin.go
+            backend/internal/service/domain_constants.go
+            backend/internal/service/openai_cyber_session_block.go
+            backend/internal/service/openai_live_lifecycle_test.go
+            backend/internal/service/openai_ws_v2_passthrough_lifecycle_test.go
+            backend/internal/service/setting_parse.go
+            backend/internal/service/setting_public.go
+            backend/internal/service/setting_update.go
+            backend/internal/service/settings_view.go
+            backend/internal/service/wire.go
+            frontend/src/api/admin/index.ts
+            frontend/src/api/admin/settings.ts
+            frontend/src/components/layout/AppSidebar.vue
+            frontend/src/i18n/locales/en/admin/settings.ts
+            frontend/src/i18n/locales/zh/admin/settings.ts
+            frontend/src/router/__tests__/feature-access.spec.ts
+            frontend/src/router/index.ts
+            frontend/src/stores/__tests__/app.spec.ts
+            frontend/src/stores/app.ts
+            frontend/src/types/index.ts
+            frontend/src/views/admin/SettingsView.vue
+          )
+
+          apply_shared_risk_commit() {
+            local sha="$1"
+            local patch="/tmp/shared-${sha}.patch"
+            git show --format= --binary "$sha" -- "${SHARED_PATHS[@]}" > "$patch"
+            if [ ! -s "$patch" ]; then
+              return 0
+            fi
+            if git apply --reverse --check "$patch" >/dev/null 2>&1; then
+              echo "shared risk delta already present: $sha"
+              return 0
+            fi
+            echo "apply shared risk delta: $sha"
             if ! git apply --3way --index "$patch"; then
-              echo "::error title=v0.2.2 risk integration conflict::$file needs explicit adaptation"
+              echo "::error title=Shared v0.2.2 adaptation conflict::$sha"
               git status --short
               git diff --name-only --diff-filter=U || true
               exit 1
             fi
-          done < /tmp/risk-non-migrations.txt
+          }
 
-          # Import only Lucky-only risk migrations. If the same semantic suffix
-          # already exists upstream, skip it. Otherwise preserve the original
-          # number when free; on collision allocate monotonically after current max.
+          for sha in \
+            811930b541bde618ced6b6b46da7e517c529d699 \
+            1f08a5849ad766f189cdd9a41abd5676fe335b73 \
+            9f5907d9c170a61dd253ab6b706e29cd3ac297ac \
+            dc8710a2bf5dfe3121de2e0021d85e825d47ea25 \
+            95719a71578b28b88ec9b86483310d9b1ac11372 \
+            f08cbc49ceac5c3eeb2dbdce9289dceba5127944 \
+            9d33034e4e4138ad7755d5dfbc6f56bb56bb39a6 \
+            de6c03cc33cb23adeeaf7036dfff3319d407b431 \
+            5e3360cceef76005c5f9b8c6607da2e35c2f54cf \
+            893e8eb5df44f94a4a12bf4bc26ddf48f167a442 \
+            b6777d88837a6f402d8edf98483b1c98e7bd0a34 \
+            e5452f34d430cb219bea1f8efbf634b7ccf3ef42 \
+            1abcb597b7b3f1f1f114cb14744e0c2ac8b4de0b \
+            65fabed9a34ddb924166d1fb85ec38b18a8804b0 \
+            189cbcb22fa639af92077c60fed1074c27aad3fb \
+            51a3fcbfa574067df531f620dc4285514ee27a58
+          do
+            apply_shared_risk_commit "$sha"
+          done
+
+          # Import Lucky-only risk migrations by semantic suffix. Reuse an
+          # existing upstream migration when the suffix already exists; otherwise
+          # move a colliding custom number after this repo's current maximum.
           current_max=$(find backend/migrations -maxdepth 1 -type f -name '[0-9]*_*.sql' -printf '%f\n' \
             | sed -nE 's/^([0-9]+)_.*/\1/p' | sort -n | tail -1)
           current_max=${current_max:-0}
           : > /tmp/migration-map.txt
-          while IFS= read -r file; do
-            [ -n "$file" ] || continue
-            base="${file##*/}"
-            old_num="${base%%_*}"
-            suffix="${base#*_}"
-            if find backend/migrations -maxdepth 1 -type f -name "[0-9]*_${suffix}" | grep -q .; then
-              echo "migration already represented: $suffix"
-              continue
-            fi
-            target="$base"
-            if find backend/migrations -maxdepth 1 -type f -name "${old_num}_*.sql" | grep -q .; then
-              current_max=$((current_max + 1))
-              target="${current_max}_${suffix}"
-            fi
-            echo "migration: $base -> $target"
-            git show "lucky/main:$file" > "backend/migrations/$target"
-            printf '%s\t%s\n' "$base" "$target" >> /tmp/migration-map.txt
-          done < /tmp/risk-migrations.txt
+          git ls-tree -r --name-only lucky/main backend/migrations \
+            | grep -E '/[0-9]+_(prompt_audit|content_moderation|moderation_async_image_observability).*\.sql$' \
+            | while IFS= read -r file; do
+                base="${file##*/}"
+                old_num="${base%%_*}"
+                suffix="${base#*_}"
+                if find backend/migrations -maxdepth 1 -type f -name "[0-9]*_${suffix}" | grep -q .; then
+                  echo "migration already represented: $suffix"
+                  continue
+                fi
+                target="$base"
+                if find backend/migrations -maxdepth 1 -type f -name "${old_num}_*.sql" | grep -q .; then
+                  current_max=$((current_max + 1))
+                  target="${current_max}_${suffix}"
+                fi
+                echo "migration: $base -> $target"
+                git show "lucky/main:$file" > "backend/migrations/$target"
+                printf '%s\t%s\n' "$base" "$target" >> /tmp/migration-map.txt
+              done
 
-          # Rewrite migration filename references in copied tests/docs when a
-          # custom number had to move.
           while IFS=$'\t' read -r old new; do
             [ -n "$old" ] || continue
             grep -rlZ --exclude-dir=.git "$old" backend docs frontend 2>/dev/null \
               | xargs -0 -r sed -i "s#${old}#${new}#g"
           done < /tmp/migration-map.txt
 
-          # Adapt Plus module imports to this fork's upstream module identity.
           grep -rlZ --exclude-dir=.git 'github.com/LuckyKuang/sub2api-plus' backend frontend 2>/dev/null \
             | xargs -0 -r sed -i 's#github.com/LuckyKuang/sub2api-plus#github.com/Wei-Shaw/sub2api#g'
-
           printf '0.2.2\n' > backend/cmd/server/VERSION
 
           mapfile -d '' gofiles < <(git diff --name-only -z -- '*.go')
@@ -153,22 +233,17 @@ jobs:
             gofmt -w "${gofiles[@]}"
           fi
 
+          # wire_gen.go is generated from the adapted provider graph; never merge
+          # Lucky's generated file into the newer v0.2.2 generated output.
+          (cd backend && go run github.com/google/wire/cmd/wire@v0.7.0 ./cmd/server)
+
           test -z "$(git diff --name-only --diff-filter=U)"
           ! grep -R 'github.com/LuckyKuang/sub2api-plus' backend frontend
           test "$(tr -d '\r\n' < backend/cmd/server/VERSION)" = '0.2.2'
-
-          # Migration versions must remain unique.
-          duplicates=$(find backend/migrations -maxdepth 1 -type f -name '[0-9]*_*.sql' -printf '%f\n' \
-            | sed -nE 's/^([0-9]+)_.*/\1/p' | sort | uniq -d)
-          if [ -n "$duplicates" ]; then
-            echo "::error::Duplicate migration versions: $duplicates"
-            exit 1
-          fi
-
+          git diff --check
           echo 'Integration diff summary:'
           git status --short
           git diff --stat
-          git diff --check
 
       - name: Install frontend dependencies
         working-directory: frontend
