@@ -52,9 +52,10 @@ jobs:
           SHARED_BASE="$(git merge-base HEAD lucky/main)"
           echo "shared base: $SHARED_BASE"
 
-          # Feature-owned files: use Lucky's CURRENT final implementation rather
-          # than replaying its intermediate history. Abort if upstream v0.2.2 also
-          # changed one of these paths; such a file requires explicit adaptation.
+          # Risk-owned surfaces may also contain newer v0.2.2 upstream work.
+          # Build the exact set of files changed by Lucky from the common base;
+          # unchanged v0.2.2 files take Lucky final state directly, while files
+          # changed by both sides get one final-state three-way merge.
           OWNED_PATHS=(
             backend/internal/auditcontent
             backend/internal/securityaudit
@@ -94,21 +95,40 @@ jobs:
             frontend/src/views/admin/__tests__/RiskControlView.spec.ts
           )
 
+          : > /tmp/owned-files.txt
           for path in "${OWNED_PATHS[@]}"; do
-            if ! git diff --quiet "$SHARED_BASE" HEAD -- "$path"; then
-              echo "::error title=Owned risk path changed in v0.2.2::$path"
-              git diff --stat "$SHARED_BASE" HEAD -- "$path"
+            git diff --name-only "$SHARED_BASE" lucky/main -- "$path" >> /tmp/owned-files.txt
+          done
+          sort -u -o /tmp/owned-files.txt /tmp/owned-files.txt
+
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            if git diff --quiet "$SHARED_BASE" HEAD -- "$file"; then
+              if git cat-file -e "lucky/main:$file" 2>/dev/null; then
+                echo "final-copy owned: $file"
+                git checkout lucky/main -- "$file"
+              elif [ -e "$file" ]; then
+                echo "remove owned file deleted by Plus: $file"
+                git rm -- "$file"
+              fi
+              continue
+            fi
+
+            patch="/tmp/owned-$(echo "$file" | tr '/ ' '__').patch"
+            git diff --binary "$SHARED_BASE" lucky/main -- "$file" > "$patch"
+            [ -s "$patch" ] || continue
+            echo "three-way owned: $file"
+            if ! git apply --3way --index "$patch"; then
+              echo "::error title=Owned v0.2.2 adaptation conflict::$file"
+              git status --short
+              git diff --name-only --diff-filter=U || true
               exit 1
             fi
-            if git cat-file -e "lucky/main:$path" 2>/dev/null; then
-              echo "final-copy owned: $path"
-              git checkout lucky/main -- "$path"
-            fi
-          done
+          done < /tmp/owned-files.txt
 
           # Shared integration surfaces are never copied wholesale from Plus.
-          # Replay only the known risk-control commits on these paths, preserving
-          # all unrelated v0.2.2 changes in gateway/settings/router/wiring files.
+          # Replay only known Plus risk-control commits on these paths so unrelated
+          # custom gateway/settings/UI behavior is not imported.
           SHARED_PATHS=(
             backend/cmd/server/wire.go
             backend/internal/handler/admin/setting_handler.go
@@ -191,32 +211,28 @@ jobs:
             apply_shared_risk_commit "$sha"
           done
 
-          # Import Lucky-only risk migrations by semantic suffix. Reuse an
-          # existing upstream migration when the suffix already exists; otherwise
-          # move a colliding custom number after this repo's current maximum.
           current_max=$(find backend/migrations -maxdepth 1 -type f -name '[0-9]*_*.sql' -printf '%f\n' \
             | sed -nE 's/^([0-9]+)_.*/\1/p' | sort -n | tail -1)
           current_max=${current_max:-0}
           : > /tmp/migration-map.txt
-          git ls-tree -r --name-only lucky/main backend/migrations \
-            | grep -E '/[0-9]+_(prompt_audit|content_moderation|moderation_async_image_observability).*\.sql$' \
-            | while IFS= read -r file; do
-                base="${file##*/}"
-                old_num="${base%%_*}"
-                suffix="${base#*_}"
-                if find backend/migrations -maxdepth 1 -type f -name "[0-9]*_${suffix}" | grep -q .; then
-                  echo "migration already represented: $suffix"
-                  continue
-                fi
-                target="$base"
-                if find backend/migrations -maxdepth 1 -type f -name "${old_num}_*.sql" | grep -q .; then
-                  current_max=$((current_max + 1))
-                  target="${current_max}_${suffix}"
-                fi
-                echo "migration: $base -> $target"
-                git show "lucky/main:$file" > "backend/migrations/$target"
-                printf '%s\t%s\n' "$base" "$target" >> /tmp/migration-map.txt
-              done
+          while IFS= read -r file; do
+            base="${file##*/}"
+            old_num="${base%%_*}"
+            suffix="${base#*_}"
+            if find backend/migrations -maxdepth 1 -type f -name "[0-9]*_${suffix}" | grep -q .; then
+              echo "migration already represented: $suffix"
+              continue
+            fi
+            target="$base"
+            if find backend/migrations -maxdepth 1 -type f -name "${old_num}_*.sql" | grep -q .; then
+              current_max=$((current_max + 1))
+              target="${current_max}_${suffix}"
+            fi
+            echo "migration: $base -> $target"
+            git show "lucky/main:$file" > "backend/migrations/$target"
+            printf '%s\t%s\n' "$base" "$target" >> /tmp/migration-map.txt
+          done < <(git ls-tree -r --name-only lucky/main backend/migrations \
+            | grep -E '/[0-9]+_(prompt_audit|content_moderation|moderation_async_image_observability).*\.sql$')
 
           while IFS=$'\t' read -r old new; do
             [ -n "$old" ] || continue
@@ -233,8 +249,8 @@ jobs:
             gofmt -w "${gofiles[@]}"
           fi
 
-          # wire_gen.go is generated from the adapted provider graph; never merge
-          # Lucky's generated file into the newer v0.2.2 generated output.
+          # Regenerate Wire from the merged provider graph instead of merging the
+          # generated v0.2.1 Plus output over the v0.2.2 generated file.
           (cd backend && go run github.com/google/wire/cmd/wire@v0.7.0 ./cmd/server)
 
           test -z "$(git diff --name-only --diff-filter=U)"
