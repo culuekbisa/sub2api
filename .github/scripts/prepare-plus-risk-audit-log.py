@@ -8,6 +8,15 @@ for line in (
 ):
     text = text.replace(line, '')
 
+# auditcontent's final Plus contract normalizes Codex delegation/automation
+# bootstrap payloads before extraction. That helper is self-contained (stdlib
+# only), so include the small openaiwire package as a required risk dependency.
+owned_anchor = 'OWNED_PATHS=(\n  backend/internal/auditcontent\n'
+owned_replacement = 'OWNED_PATHS=(\n  backend/internal/auditcontent\n  backend/internal/openaiwire\n'
+if owned_anchor not in text:
+    raise SystemExit('missing owned paths anchor')
+text = text.replace(owned_anchor, owned_replacement, 1)
+
 # `grep -l` returns 1 when there are no matches. Under `set -e -o pipefail`
 # that is not an integration failure, so make the two optional rewrite scans
 # explicitly tolerant of the no-match case.
