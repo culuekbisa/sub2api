@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 env:
-  PORT_REVISION: '11'
+  PORT_REVISION: '12'
 
 jobs:
   port-and-test:
