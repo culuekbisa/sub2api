@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 env:
-  PORT_REVISION: '10'
+  PORT_REVISION: '11'
 
 jobs:
   port-and-test:
@@ -31,7 +31,9 @@ jobs:
           cache-dependency-path: backend/go.sum
 
       - name: Prepare v0.2.2 shared ingress adaptations
-        run: python3 .github/scripts/prepare-plus-risk-v022.py
+        run: |
+          python3 .github/scripts/prepare-plus-risk-v022.py
+          python3 .github/scripts/prepare-plus-risk-audit-log.py
 
       - name: Port Plus final risk-control state
         run: bash .github/scripts/port-plus-risk.sh
@@ -72,7 +74,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           test "$(tr -d '\r\n' < backend/cmd/server/VERSION)" = '0.2.2'
-          git rm .github/workflows/port-plus-risk.yml .github/scripts/port-plus-risk.sh .github/scripts/prepare-plus-risk-v022.py
+          git rm .github/workflows/port-plus-risk.yml .github/scripts/port-plus-risk.sh .github/scripts/prepare-plus-risk-v022.py .github/scripts/prepare-plus-risk-audit-log.py
           git add -A
           if git diff --cached --quiet; then
             echo '::error::No integration changes produced'
