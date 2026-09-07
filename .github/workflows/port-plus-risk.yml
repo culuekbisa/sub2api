@@ -54,25 +54,26 @@ jobs:
             exit 1
           fi
 
-          echo "shared base: $(git merge-base HEAD lucky/main)"
+          SHARED_BASE="$(git merge-base HEAD lucky/main)"
+          echo "shared base: $SHARED_BASE"
+          echo 'v0.2.2 files changed since shared base that intersect integration paths:'
+          git diff --name-only "$SHARED_BASE" HEAD -- backend/internal/handler backend/internal/service backend/internal/server frontend/src | grep -E '(security_audit|content_moderation|openai_gateway_handler|openai_live|gateway_handler|RiskControl|PromptAudit|router)' || true
 
           RISK_PATHS=(
             ':(glob)backend/internal/auditcontent/**'
             ':(glob)backend/internal/securityaudit/**'
             ':(glob)backend/internal/service/content_moderation*.go'
+            ':(exclude)backend/internal/service/content_moderation.go'
             ':(glob)backend/internal/repository/content_moderation*.go'
             ':(glob)backend/internal/handler/admin/content_moderation*.go'
             ':(glob)backend/internal/handler/content_moderation*.go'
             ':(glob)backend/internal/handler/security_audit*.go'
+            ':(exclude,glob)backend/internal/handler/security_audit*test.go'
             'backend/internal/handler/gateway_handler.go'
             'backend/internal/handler/gateway_handler_chat_completions.go'
             'backend/internal/handler/gateway_handler_responses.go'
             'backend/internal/handler/openai_gateway_handler.go'
-            'backend/internal/handler/openai_live.go'
-            ':(glob)backend/internal/handler/*security_audit*test.go'
-            ':(glob)backend/internal/handler/*content_moderation*test.go'
             ':(glob)backend/internal/handler/openai_gateway_handler*test.go'
-            'backend/internal/handler/openai_live_test.go'
             ':(glob)backend/internal/server/**'
             ':(glob)backend/migrations/*content_moderation*.sql'
             ':(glob)backend/migrations/*content_moderation*migration_test.go'
@@ -94,34 +95,27 @@ jobs:
             'docs/SECURITY_AUDIT_CONTENT_COVERAGE.md'
           )
 
-          resolve_first_pass_conflicts() {
+          resolve_v022_gateway_conflict() {
             local sha="$1"
-            if [ "$sha" != '811930b541bde618ced6b6b46da7e517c529d699' ]; then
-              return 1
+            local unresolved
+            unresolved="$(git diff --name-only --diff-filter=U)"
+            if [ -z "$unresolved" ]; then
+              return 0
             fi
-            # These files advanced substantially between Plus' original hardening
-            # patch and upstream v0.2.2. Preserve v0.2.2 here; later Plus deltas and
-            # tests will identify any semantic pieces that still need adaptation.
-            local files=(
-              backend/internal/handler/openai_gateway_handler.go
-              backend/internal/handler/openai_live.go
-              backend/internal/handler/openai_live_test.go
-              backend/internal/handler/security_audit_errors_test.go
-              backend/internal/handler/security_audit_order_test.go
-              backend/internal/service/content_moderation.go
-            )
-            local file
-            for file in "${files[@]}"; do
-              if git diff --name-only --diff-filter=U | grep -Fxq "$file"; then
-                echo "preserving v0.2.2 side for first-pass conflict: $file"
-                git checkout --ours -- "$file"
-                git add "$file"
-              fi
-            done
-            if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
-              return 1
-            fi
-            return 0
+            while IFS= read -r file; do
+              [ -n "$file" ] || continue
+              case "$file" in
+                backend/internal/handler/openai_gateway_handler.go)
+                  echo "preserving v0.2.2 gateway side for $sha: $file"
+                  git checkout --ours -- "$file"
+                  git add "$file"
+                  ;;
+                *)
+                  return 1
+                  ;;
+              esac
+            done <<< "$unresolved"
+            [ -z "$(git diff --name-only --diff-filter=U)" ]
           }
 
           apply_risk_commit() {
@@ -138,8 +132,8 @@ jobs:
               return 0
             fi
             if ! git apply --3way --index "$patch"; then
-              if resolve_first_pass_conflicts "$sha"; then
-                echo "resolved first-pass v0.2.2 conflicts for $sha"
+              if resolve_v022_gateway_conflict "$sha"; then
+                echo "resolved v0.2.2 gateway conflict for $sha"
                 return 0
               fi
               echo "::error::Failed applying $sha"
@@ -169,6 +163,18 @@ jobs:
           do
             apply_risk_commit "$sha"
           done
+
+          # These risk-owned files were not changed by upstream between the shared
+          # v0.2.1 baseline and v0.2.2, so use Plus' current final state directly.
+          git checkout lucky/main -- \
+            backend/internal/service/content_moderation.go \
+            backend/internal/handler/openai_live.go \
+            backend/internal/handler/openai_live_test.go
+
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            git checkout lucky/main -- "$file"
+          done < <(git ls-tree -r --name-only lucky/main backend/internal/handler | grep '/security_audit.*_test\.go$' || true)
 
           while IFS= read -r -d '' file; do
             sed -i 's#github.com/LuckyKuang/sub2api-plus#github.com/Wei-Shaw/sub2api#g' "$file"
