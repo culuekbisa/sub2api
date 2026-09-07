@@ -1,0 +1,194 @@
+name: Port Plus Risk Control
+
+on:
+  push:
+    branches:
+      - feat/plus-risk-audit-v0.2.2
+    paths:
+      - '.github/workflows/port-plus-risk.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  port-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache: true
+          cache-dependency-path: backend/go.sum
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Fetch Plus history and apply risk-control deltas
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add lucky https://github.com/LuckyKuang/sub2api-plus.git
+          git fetch --no-tags lucky main
+
+          BASE_VERSION="$(tr -d '\r\n' < backend/cmd/server/VERSION)"
+          if [ "$BASE_VERSION" != '0.2.2' ]; then
+            echo "::error::Expected v0.2.2 base, got $BASE_VERSION"
+            exit 1
+          fi
+
+          echo "shared base: $(git merge-base HEAD lucky/main)"
+
+          RISK_PATHS=(
+            ':(glob)backend/internal/auditcontent/**'
+            ':(glob)backend/internal/securityaudit/**'
+            ':(glob)backend/internal/service/content_moderation*.go'
+            ':(glob)backend/internal/repository/content_moderation*.go'
+            ':(glob)backend/internal/handler/admin/content_moderation*.go'
+            ':(glob)backend/internal/handler/content_moderation*.go'
+            ':(glob)backend/internal/handler/security_audit*.go'
+            'backend/internal/handler/gateway_handler.go'
+            'backend/internal/handler/gateway_handler_chat_completions.go'
+            'backend/internal/handler/gateway_handler_responses.go'
+            'backend/internal/handler/openai_gateway_handler.go'
+            'backend/internal/handler/openai_live.go'
+            ':(glob)backend/internal/handler/*security_audit*test.go'
+            ':(glob)backend/internal/handler/*content_moderation*test.go'
+            ':(glob)backend/internal/handler/openai_gateway_handler*test.go'
+            'backend/internal/handler/openai_live_test.go'
+            ':(glob)backend/internal/server/**'
+            ':(glob)backend/migrations/*content_moderation*.sql'
+            ':(glob)backend/migrations/*content_moderation*migration_test.go'
+            ':(glob)backend/migrations/*prompt_audit*.sql'
+            ':(glob)backend/migrations/*prompt_audit*migration_test.go'
+            ':(glob)frontend/src/**/RiskControl*.vue'
+            ':(glob)frontend/src/**/PromptAudit*.vue'
+            ':(glob)frontend/src/**/risk-control/**'
+            ':(glob)frontend/src/**/prompt-audit/**'
+            ':(glob)frontend/src/api/admin/*moderation*'
+            ':(glob)frontend/src/api/admin/*Moderation*'
+            ':(glob)frontend/src/api/admin/*prompt*audit*'
+            ':(glob)frontend/src/api/admin/*Prompt*Audit*'
+            'frontend/src/i18n/locales/en/admin/resources.ts'
+            'frontend/src/i18n/locales/zh/admin/resources.ts'
+            'frontend/src/i18n/locales/en/admin/settings.ts'
+            'frontend/src/i18n/locales/zh/admin/settings.ts'
+            'frontend/src/router/index.ts'
+            'docs/SECURITY_AUDIT_CONTENT_COVERAGE.md'
+          )
+
+          apply_risk_commit() {
+            local sha="$1"
+            local patch="/tmp/${sha}.patch"
+            echo "== applying risk delta $sha =="
+            git show --format= --binary "$sha" -- "${RISK_PATHS[@]}" > "$patch"
+            if [ ! -s "$patch" ]; then
+              echo "no selected risk paths in $sha"
+              return 0
+            fi
+            if git apply --reverse --check "$patch" >/dev/null 2>&1; then
+              echo "selected delta already present: $sha"
+              return 0
+            fi
+            if ! git apply --3way --index "$patch"; then
+              echo "::error::Failed applying $sha"
+              git status --short
+              git diff --name-only --diff-filter=U || true
+              exit 1
+            fi
+          }
+
+          # Plus-only security-audit and moderation improvements, in historical order.
+          for sha in \
+            811930b541bde618ced6b6b46da7e517c529d699 \
+            1f08a5849ad766f189cdd9a41abd5676fe335b73 \
+            9f5907d9c170a61dd253ab6b706e29cd3ac297ac \
+            dc8710a2bf5dfe3121de2e0021d85e825d47ea25 \
+            95719a71578b28b88ec9b86483310d9b1ac11372 \
+            f08cbc49ceac5c3eeb2dbdce9289dceba5127944 \
+            9d33034e4e4138ad7755d5dfbc6f56bb56bb39a6 \
+            de6c03cc33cb23adeeaf7036dfff3319d407b431 \
+            5e3360cceef76005c5f9b8c6607da2e35c2f54cf \
+            893e8eb5df44f94a4a12bf4bc26ddf48f167a442 \
+            b6777d88837a6f402d8edf98483b1c98e7bd0a34 \
+            e5452f34d430cb219bea1f8efbf634b7ccf3ef42 \
+            1abcb597b7b3f1f1f114cb14744e0c2ac8b4de0b \
+            65fabed9a34ddb924166d1fb85ec38b18a8804b0 \
+            189cbcb22fa639af92077c60fed1074c27aad3fb \
+            51a3fcbfa574067df531f620dc4285514ee27a58
+          do
+            apply_risk_commit "$sha"
+          done
+
+          # Adapt Plus module imports back to the upstream module path used by this fork.
+          while IFS= read -r -d '' file; do
+            sed -i 's#github.com/LuckyKuang/sub2api-plus#github.com/Wei-Shaw/sub2api#g' "$file"
+          done < <(grep -rlZ 'github.com/LuckyKuang/sub2api-plus' backend frontend 2>/dev/null || true)
+
+          # Never import Plus release/version metadata into this fork.
+          printf '0.2.2\n' > backend/cmd/server/VERSION
+
+          mapfile -d '' gofiles < <(git diff --name-only -z -- '*.go')
+          if [ "${#gofiles[@]}" -gt 0 ]; then
+            gofmt -w "${gofiles[@]}"
+          fi
+
+          if grep -R 'github.com/LuckyKuang/sub2api-plus' backend frontend; then
+            echo '::error::Unadapted Plus module import remains'
+            exit 1
+          fi
+
+          echo 'Changed files:'
+          git status --short
+          git diff --check
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Backend unit tests
+        working-directory: backend
+        run: make test-unit
+
+      - name: Backend integration tests
+        working-directory: backend
+        run: make test-integration
+
+      - name: Frontend typecheck and critical tests
+        run: make test-frontend
+
+      - name: Focused security-audit tests
+        working-directory: backend
+        run: |
+          go test ./internal/auditcontent/... ./internal/securityaudit/... ./internal/service/... ./internal/repository/... ./internal/handler/... ./internal/server/... -count=1
+
+      - name: Commit tested port to branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n' < backend/cmd/server/VERSION)" = '0.2.2'
+          git rm .github/workflows/port-plus-risk.yml
+          git add -A
+          if git diff --cached --quiet; then
+            echo '::error::No integration changes produced'
+            exit 1
+          fi
+          git commit -m 'feat(risk): port Plus security audit to v0.2.2'
+          git push origin HEAD:feat/plus-risk-audit-v0.2.2
