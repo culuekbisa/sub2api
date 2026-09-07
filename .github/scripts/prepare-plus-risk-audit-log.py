@@ -7,6 +7,24 @@ for line in (
     '  backend/internal/server/middleware/audit_log_test.go\n',
 ):
     text = text.replace(line, '')
+
+# `grep -l` returns 1 when there are no matches. Under `set -e -o pipefail`
+# that is not an integration failure, so make the two optional rewrite scans
+# explicitly tolerant of the no-match case.
+old = '''  grep -rlZ --exclude-dir=.git "$old" backend docs frontend 2>/dev/null \\
+    | xargs -0 -r sed -i "s#${old}#${new}#g"\n'''
+new = '''  { grep -rlZ --exclude-dir=.git "$old" backend docs frontend 2>/dev/null || true; } \\
+    | xargs -0 -r sed -i "s#${old}#${new}#g"\n'''
+if old not in text:
+    raise SystemExit('missing migration reference rewrite anchor')
+text = text.replace(old, new, 1)
+old = '''grep -rlZ --exclude-dir=.git 'github.com/LuckyKuang/sub2api-plus' backend frontend 2>/dev/null \\
+  | xargs -0 -r sed -i 's#github.com/LuckyKuang/sub2api-plus#github.com/Wei-Shaw/sub2api#g'\n'''
+new = '''{ grep -rlZ --exclude-dir=.git 'github.com/LuckyKuang/sub2api-plus' backend frontend 2>/dev/null || true; } \\
+  | xargs -0 -r sed -i 's#github.com/LuckyKuang/sub2api-plus#github.com/Wei-Shaw/sub2api#g'\n'''
+if old not in text:
+    raise SystemExit('missing module rewrite anchor')
+text = text.replace(old, new, 1)
 script.write_text(text)
 
 path = Path('backend/internal/server/middleware/audit_log.go')
