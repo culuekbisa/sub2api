@@ -10,6 +10,9 @@ on:
 permissions:
   contents: write
 
+env:
+  PORT_REVISION: '10'
+
 jobs:
   port-and-test:
     runs-on: ubuntu-latest
