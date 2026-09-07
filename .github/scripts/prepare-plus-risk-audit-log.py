@@ -35,6 +35,33 @@ if old not in text:
     raise SystemExit('missing module rewrite anchor')
 text = text.replace(old, new, 1)
 
+# Normalize the final v0.2.2 Live handler imports after every selected patch has
+# landed. The merged handler needs context/errors for the audit hook, while the
+# old encoding/json dependency may disappear in the final implementation.
+import_anchor = "printf '0.2.2\\n' > backend/cmd/server/VERSION\n\n"
+import_fix = r'''python3 - <<'PY_LIVE_IMPORTS'
+from pathlib import Path
+
+path = Path('backend/internal/handler/openai_live.go')
+source = path.read_text()
+start = source.index('import (\n')
+end = source.index(')\n\n', start)
+imports = source[start:end]
+body = source[end + 3:]
+for package in ('context', 'errors'):
+    if f'{package}.' in body and f'\t"{package}"\n' not in imports:
+        imports += f'\t"{package}"\n'
+if 'json.' not in body:
+    imports = imports.replace('\t"encoding/json"\n', '')
+path.write_text(source[:start] + imports + source[end:])
+PY_LIVE_IMPORTS
+printf '0.2.2\n' > backend/cmd/server/VERSION
+
+'''
+if import_anchor not in text:
+    raise SystemExit('missing final import normalization anchor')
+text = text.replace(import_anchor, import_fix, 1)
+
 # The upstream migration history intentionally contains repeated numeric prefixes,
 # so a repository-wide `uniq -d` check is invalid. Validate only the target names
 # produced by this port and make sure every mapped migration was materialized.
