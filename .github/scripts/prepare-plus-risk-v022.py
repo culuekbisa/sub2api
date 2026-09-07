@@ -9,9 +9,10 @@ def replace_once(path: str, old: str, new: str) -> None:
     p.write_text(text.replace(old, new, 1))
 
 
-# The first Plus hardening commit was written on top of Plus-only Live/IP hook
-# infrastructure. Keep those shared files out of historical patch replay and
-# adapt only the security-audit boundary to the current v0.2.2 implementation.
+# The early Plus hardening commits were written on top of Plus-only Live/IP hook
+# infrastructure and intermediate WS lifecycle assertions that were later
+# superseded. Keep those shared files out of historical patch replay and adapt
+# only the security-audit boundary to the current v0.2.2 implementation.
 script = Path('.github/scripts/port-plus-risk.sh')
 text = script.read_text()
 for line in (
@@ -19,6 +20,7 @@ for line in (
     '  backend/internal/handler/openai_live.go\n',
     '  backend/internal/handler/openai_live_test.go\n',
     '  backend/internal/service/openai_live_lifecycle_test.go\n',
+    '  backend/internal/service/openai_ws_v2_passthrough_lifecycle_test.go\n',
 ):
     text = text.replace(line, '')
 script.write_text(text)
