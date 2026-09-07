@@ -39,7 +39,7 @@ jobs:
           cache: 'pnpm'
           cache-dependency-path: frontend/pnpm-lock.yaml
 
-      - name: Fetch Plus history and apply risk-control deltas
+      - name: Port Plus final risk-control state
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -48,137 +48,103 @@ jobs:
           git remote add lucky https://github.com/LuckyKuang/sub2api-plus.git
           git fetch --no-tags lucky main
 
-          BASE_VERSION="$(tr -d '\r\n' < backend/cmd/server/VERSION)"
-          if [ "$BASE_VERSION" != '0.2.2' ]; then
-            echo "::error::Expected v0.2.2 base, got $BASE_VERSION"
-            exit 1
-          fi
-
+          test "$(tr -d '\r\n' < backend/cmd/server/VERSION)" = '0.2.2'
           SHARED_BASE="$(git merge-base HEAD lucky/main)"
           echo "shared base: $SHARED_BASE"
-          echo 'v0.2.2 files changed since shared base that intersect integration paths:'
-          git diff --name-only "$SHARED_BASE" HEAD -- backend/internal/handler backend/internal/service backend/internal/server frontend/src | grep -E '(security_audit|content_moderation|openai_gateway_handler|openai_live|gateway_handler|RiskControl|PromptAudit|router)' || true
 
-          RISK_PATHS=(
-            ':(glob)backend/internal/auditcontent/**'
-            ':(glob)backend/internal/securityaudit/**'
-            ':(glob)backend/internal/service/content_moderation*.go'
-            ':(exclude)backend/internal/service/content_moderation.go'
-            ':(glob)backend/internal/repository/content_moderation*.go'
-            ':(glob)backend/internal/handler/admin/content_moderation*.go'
-            ':(glob)backend/internal/handler/content_moderation*.go'
-            ':(glob)backend/internal/handler/security_audit*.go'
-            ':(exclude,glob)backend/internal/handler/security_audit*test.go'
-            'backend/internal/handler/gateway_handler.go'
-            'backend/internal/handler/gateway_handler_chat_completions.go'
-            'backend/internal/handler/gateway_handler_responses.go'
-            'backend/internal/handler/openai_gateway_handler.go'
-            ':(glob)backend/internal/handler/openai_gateway_handler*test.go'
-            ':(glob)backend/internal/server/**'
-            ':(glob)backend/migrations/*content_moderation*.sql'
-            ':(glob)backend/migrations/*content_moderation*migration_test.go'
-            ':(glob)backend/migrations/*prompt_audit*.sql'
-            ':(glob)backend/migrations/*prompt_audit*migration_test.go'
-            ':(glob)frontend/src/**/RiskControl*.vue'
-            ':(glob)frontend/src/**/PromptAudit*.vue'
-            ':(glob)frontend/src/**/risk-control/**'
-            ':(glob)frontend/src/**/prompt-audit/**'
-            ':(glob)frontend/src/api/admin/*moderation*'
-            ':(glob)frontend/src/api/admin/*Moderation*'
-            ':(glob)frontend/src/api/admin/*prompt*audit*'
-            ':(glob)frontend/src/api/admin/*Prompt*Audit*'
-            'frontend/src/i18n/locales/en/admin/resources.ts'
-            'frontend/src/i18n/locales/zh/admin/resources.ts'
-            'frontend/src/i18n/locales/en/admin/settings.ts'
-            'frontend/src/i18n/locales/zh/admin/settings.ts'
-            'frontend/src/router/index.ts'
-            'docs/SECURITY_AUDIT_CONTENT_COVERAGE.md'
-          )
+          git diff --name-only "$SHARED_BASE" lucky/main > /tmp/lucky-changed.txt
+          : > /tmp/risk-files.txt
 
-          resolve_v022_gateway_conflict() {
-            local sha="$1"
-            local unresolved
-            unresolved="$(git diff --name-only --diff-filter=U)"
-            if [ -z "$unresolved" ]; then
-              return 0
+          # Select every final Lucky change whose path or diff actually belongs to
+          # Security Audit / Prompt Audit / Content Moderation. This catches the
+          # obvious feature-owned files and thin integration hunks in shared files.
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            case "$file" in
+              backend/internal/auditcontent/*|backend/internal/securityaudit/*|backend/internal/service/content_moderation*.go|backend/internal/repository/content_moderation*.go|backend/internal/handler/admin/content_moderation*.go|backend/internal/handler/content_moderation*.go|backend/internal/handler/security_audit*.go|backend/internal/handler/openai_live*.go|frontend/src/features/prompt-audit/*|frontend/src/*/risk-control/*|frontend/src/*/prompt-audit/*|docs/SECURITY_AUDIT_CONTENT_COVERAGE.md)
+                echo "$file" >> /tmp/risk-files.txt
+                continue
+                ;;
+            esac
+            if git diff "$SHARED_BASE" lucky/main -- "$file" | grep -Eq 'ContentModeration|content_moderation|securityaudit|SecurityAudit|security_audit|PromptAudit|prompt_audit|prompt-audit|risk_control|risk-control|SessionBlock|session_block|CyberPolicyAutoBan'; then
+              echo "$file" >> /tmp/risk-files.txt
             fi
-            while IFS= read -r file; do
-              [ -n "$file" ] || continue
-              case "$file" in
-                backend/internal/handler/openai_gateway_handler.go)
-                  echo "preserving v0.2.2 gateway side for $sha: $file"
-                  git checkout --ours -- "$file"
-                  git add "$file"
-                  ;;
-                *)
-                  return 1
-                  ;;
-              esac
-            done <<< "$unresolved"
-            [ -z "$(git diff --name-only --diff-filter=U)" ]
-          }
+          done < /tmp/lucky-changed.txt
+          sort -u -o /tmp/risk-files.txt /tmp/risk-files.txt
 
-          apply_risk_commit() {
-            local sha="$1"
-            local patch="/tmp/${sha}.patch"
-            echo "== applying risk delta $sha =="
-            git show --format= --binary "$sha" -- "${RISK_PATHS[@]}" > "$patch"
-            if [ ! -s "$patch" ]; then
-              echo "no selected risk paths in $sha"
-              return 0
-            fi
-            if git apply --reverse --check "$patch" >/dev/null 2>&1; then
-              echo "selected delta already present: $sha"
-              return 0
-            fi
-            if ! git apply --3way --index "$patch"; then
-              if resolve_v022_gateway_conflict "$sha"; then
-                echo "resolved v0.2.2 gateway conflict for $sha"
-                return 0
+          echo 'Selected final risk-control files:'
+          cat /tmp/risk-files.txt
+
+          # SQL migrations are copied separately so custom migration numbers can
+          # never collide with the newer v0.2.2 migration chain.
+          grep '^backend/migrations/.*\.sql$' /tmp/risk-files.txt > /tmp/risk-migrations.txt || true
+          grep -v '^backend/migrations/.*\.sql$' /tmp/risk-files.txt > /tmp/risk-non-migrations.txt || true
+
+          # Apply one final-state delta per shared file. Risk-owned files that the
+          # v0.2.2 line never touched can be taken verbatim from Lucky current main.
+          # Files changed by both sides get a real three-way merge from the common
+          # ancestor, preserving upstream 0.2.2 changes instead of downgrading them.
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            if git diff --quiet "$SHARED_BASE" HEAD -- "$file"; then
+              if git cat-file -e "lucky/main:$file" 2>/dev/null; then
+                echo "final-copy: $file"
+                git checkout lucky/main -- "$file"
+              elif [ -e "$file" ]; then
+                git rm -- "$file"
               fi
-              echo "::error::Failed applying $sha"
+              continue
+            fi
+
+            patch="/tmp/final-$(echo "$file" | tr '/ ' '__').patch"
+            git diff --binary "$SHARED_BASE" lucky/main -- "$file" > "$patch"
+            [ -s "$patch" ] || continue
+            echo "three-way adapt: $file"
+            if ! git apply --3way --index "$patch"; then
+              echo "::error title=v0.2.2 risk integration conflict::$file needs explicit adaptation"
               git status --short
               git diff --name-only --diff-filter=U || true
               exit 1
             fi
-          }
+          done < /tmp/risk-non-migrations.txt
 
-          for sha in \
-            811930b541bde618ced6b6b46da7e517c529d699 \
-            1f08a5849ad766f189cdd9a41abd5676fe335b73 \
-            9f5907d9c170a61dd253ab6b706e29cd3ac297ac \
-            dc8710a2bf5dfe3121de2e0021d85e825d47ea25 \
-            95719a71578b28b88ec9b86483310d9b1ac11372 \
-            f08cbc49ceac5c3eeb2dbdce9289dceba5127944 \
-            9d33034e4e4138ad7755d5dfbc6f56bb56bb39a6 \
-            de6c03cc33cb23adeeaf7036dfff3319d407b431 \
-            5e3360cceef76005c5f9b8c6607da2e35c2f54cf \
-            893e8eb5df44f94a4a12bf4bc26ddf48f167a442 \
-            b6777d88837a6f402d8edf98483b1c98e7bd0a34 \
-            e5452f34d430cb219bea1f8efbf634b7ccf3ef42 \
-            1abcb597b7b3f1f1f114cb14744e0c2ac8b4de0b \
-            65fabed9a34ddb924166d1fb85ec38b18a8804b0 \
-            189cbcb22fa639af92077c60fed1074c27aad3fb \
-            51a3fcbfa574067df531f620dc4285514ee27a58
-          do
-            apply_risk_commit "$sha"
-          done
-
-          # These risk-owned files were not changed by upstream between the shared
-          # v0.2.1 baseline and v0.2.2, so use Plus' current final state directly.
-          git checkout lucky/main -- \
-            backend/internal/service/content_moderation.go \
-            backend/internal/handler/openai_live.go \
-            backend/internal/handler/openai_live_test.go
-
+          # Import only Lucky-only risk migrations. If the same semantic suffix
+          # already exists upstream, skip it. Otherwise preserve the original
+          # number when free; on collision allocate monotonically after current max.
+          current_max=$(find backend/migrations -maxdepth 1 -type f -name '[0-9]*_*.sql' -printf '%f\n' \
+            | sed -nE 's/^([0-9]+)_.*/\1/p' | sort -n | tail -1)
+          current_max=${current_max:-0}
+          : > /tmp/migration-map.txt
           while IFS= read -r file; do
             [ -n "$file" ] || continue
-            git checkout lucky/main -- "$file"
-          done < <(git ls-tree -r --name-only lucky/main backend/internal/handler | grep '/security_audit.*_test\.go$' || true)
+            base="${file##*/}"
+            old_num="${base%%_*}"
+            suffix="${base#*_}"
+            if find backend/migrations -maxdepth 1 -type f -name "[0-9]*_${suffix}" | grep -q .; then
+              echo "migration already represented: $suffix"
+              continue
+            fi
+            target="$base"
+            if find backend/migrations -maxdepth 1 -type f -name "${old_num}_*.sql" | grep -q .; then
+              current_max=$((current_max + 1))
+              target="${current_max}_${suffix}"
+            fi
+            echo "migration: $base -> $target"
+            git show "lucky/main:$file" > "backend/migrations/$target"
+            printf '%s\t%s\n' "$base" "$target" >> /tmp/migration-map.txt
+          done < /tmp/risk-migrations.txt
 
-          while IFS= read -r -d '' file; do
-            sed -i 's#github.com/LuckyKuang/sub2api-plus#github.com/Wei-Shaw/sub2api#g' "$file"
-          done < <(grep -rlZ 'github.com/LuckyKuang/sub2api-plus' backend frontend 2>/dev/null || true)
+          # Rewrite migration filename references in copied tests/docs when a
+          # custom number had to move.
+          while IFS=$'\t' read -r old new; do
+            [ -n "$old" ] || continue
+            grep -rlZ --exclude-dir=.git "$old" backend docs frontend 2>/dev/null \
+              | xargs -0 -r sed -i "s#${old}#${new}#g"
+          done < /tmp/migration-map.txt
+
+          # Adapt Plus module imports to this fork's upstream module identity.
+          grep -rlZ --exclude-dir=.git 'github.com/LuckyKuang/sub2api-plus' backend frontend 2>/dev/null \
+            | xargs -0 -r sed -i 's#github.com/LuckyKuang/sub2api-plus#github.com/Wei-Shaw/sub2api#g'
 
           printf '0.2.2\n' > backend/cmd/server/VERSION
 
@@ -187,13 +153,21 @@ jobs:
             gofmt -w "${gofiles[@]}"
           fi
 
-          if grep -R 'github.com/LuckyKuang/sub2api-plus' backend frontend; then
-            echo '::error::Unadapted Plus module import remains'
+          test -z "$(git diff --name-only --diff-filter=U)"
+          ! grep -R 'github.com/LuckyKuang/sub2api-plus' backend frontend
+          test "$(tr -d '\r\n' < backend/cmd/server/VERSION)" = '0.2.2'
+
+          # Migration versions must remain unique.
+          duplicates=$(find backend/migrations -maxdepth 1 -type f -name '[0-9]*_*.sql' -printf '%f\n' \
+            | sed -nE 's/^([0-9]+)_.*/\1/p' | sort | uniq -d)
+          if [ -n "$duplicates" ]; then
+            echo "::error::Duplicate migration versions: $duplicates"
             exit 1
           fi
 
-          echo 'Changed files:'
+          echo 'Integration diff summary:'
           git status --short
+          git diff --stat
           git diff --check
 
       - name: Install frontend dependencies
@@ -213,8 +187,7 @@ jobs:
 
       - name: Focused security-audit tests
         working-directory: backend
-        run: |
-          go test ./internal/auditcontent/... ./internal/securityaudit/... ./internal/service/... ./internal/repository/... ./internal/handler/... ./internal/server/... -count=1
+        run: go test ./internal/auditcontent/... ./internal/securityaudit/... ./internal/service/... ./internal/repository/... ./internal/handler/... ./internal/server/... -count=1
 
       - name: Commit tested port to branch
         shell: bash
