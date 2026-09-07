@@ -25,6 +25,16 @@ new = '''{ grep -rlZ --exclude-dir=.git 'github.com/LuckyKuang/sub2api-plus' bac
 if old not in text:
     raise SystemExit('missing module rewrite anchor')
 text = text.replace(old, new, 1)
+
+# The upstream migration history intentionally contains repeated numeric prefixes,
+# so a repository-wide `uniq -d` check is invalid. Validate only the target names
+# produced by this port and make sure every mapped migration was materialized.
+old = '''duplicates=$(find backend/migrations -maxdepth 1 -type f -name '[0-9]*_*.sql' -printf '%f\\n' \\
+  | sed -nE 's/^([0-9]+)_.*/\\1/p' | sort | uniq -d)\nif [ -n "$duplicates" ]; then\n  echo "::error::Duplicate migration versions: $duplicates"\n  exit 1\nfi\n'''
+new = '''duplicates=$(cut -f2 /tmp/migration-map.txt | sed '/^$/d' | sort | uniq -d)\nif [ -n "$duplicates" ]; then\n  echo "::error::Duplicate imported migration targets: $duplicates"\n  exit 1\nfi\nwhile IFS=$'\\t' read -r old_migration new_migration; do\n  [ -n "$new_migration" ] || continue\n  test -f "backend/migrations/$new_migration" || {\n    echo "::error::Imported migration missing: $new_migration"\n    exit 1\n  }\ndone < /tmp/migration-map.txt\n'''
+if old not in text:
+    raise SystemExit('missing duplicate migration validation anchor')
+text = text.replace(old, new, 1)
 script.write_text(text)
 
 path = Path('backend/internal/server/middleware/audit_log.go')
