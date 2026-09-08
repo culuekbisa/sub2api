@@ -9,6 +9,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/securityaudit"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -128,7 +129,7 @@ func TestPromptGuardGeminiErrorEnvelopeGolden(t *testing.T) {
 		errorInfo := requireObject(t, details[0])
 		require.Equal(t, "type.googleapis.com/google.rpc.ErrorInfo", errorInfo["@type"])
 		require.Equal(t, decision.ErrorCode, errorInfo["reason"])
-		require.Equal(t, "sub2api.securityaudit", errorInfo["domain"])
+		require.Equal(t, "gateway.security", errorInfo["domain"])
 		metadata := requireObject(t, errorInfo["metadata"])
 		require.Equal(t, map[string]any{"request_id": "request-error-golden"}, metadata)
 	}
@@ -156,4 +157,23 @@ func TestLegacyModerationErrorKeepsExistingClientPriority(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), "legacy exact message")
 	require.Contains(t, recorder.Body.String(), "content_policy_violation")
 	require.NotContains(t, recorder.Body.String(), securityaudit.ErrorCodeBlocked)
+}
+
+func TestLegacyModerationDependencyFailureUsesUnavailableEnvelope(t *testing.T) {
+	decision := &securityaudit.Decision{
+		Kind: securityaudit.DecisionUnavailable, HTTPStatus: http.StatusServiceUnavailable,
+		ErrorCode: service.ContentModerationErrorCodeUnavailable, ClientMessage: "content moderation is temporarily unavailable",
+		Legacy: &securityaudit.LegacyDecision{
+			Blocked: true, StatusCode: http.StatusServiceUnavailable,
+			ErrorCode: service.ContentModerationErrorCodeUnavailable,
+			Message:   "content moderation is temporarily unavailable",
+			Action:    service.ContentModerationActionError,
+		},
+	}
+	c, recorder := securityAuditErrorTestContext(t)
+	(&OpenAIGatewayHandler{}).openAISecurityAuditError(c, decision)
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Contains(t, recorder.Body.String(), service.ContentModerationErrorCodeUnavailable)
+	require.NotContains(t, recorder.Body.String(), service.ContentModerationErrorCodePolicy)
+	require.Equal(t, int64(1013), int64(securityAuditWSCloseStatus(decision)))
 }

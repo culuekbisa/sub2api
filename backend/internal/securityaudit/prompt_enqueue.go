@@ -22,6 +22,12 @@ func NewEnqueuer(config ConfigStore, repo JobRepository, payload PayloadStore, m
 
 func (e *Enqueuer) Enqueue(ctx context.Context, req Request) error {
 	if e == nil || e.config == nil || e.repo == nil || e.payload == nil {
+		LogWarn(EventEnqueueDropped, mergeLogFields(requestLogFields(req), map[string]any{
+			"status": "dropped", "error_code": "enqueuer_unavailable", "error_kind": "audit_dependency",
+		}))
+		if e != nil {
+			e.recordDropped()
+		}
 		return errors.New("prompt audit enqueuer unavailable")
 	}
 	cfg, ok := e.config.Active()
@@ -40,15 +46,32 @@ func (e *Enqueuer) Enqueue(ctx context.Context, req Request) error {
 		LogWarn(EventEnqueueDropped, mergeLogFields(baseFields, map[string]any{"status": "dropped", "error_code": "no_enabled_endpoint"}))
 		return nil
 	}
-	snapshot, err := ExtractPromptSnapshot(req)
+	snapshot, diagnostic, err := extractPromptSnapshotWithDiagnostics(req, false)
+	if diagnostic.Failed {
+		e.recordExtraction(ExtractionFailed)
+		logPromptExtractionFailure(req, diagnostic)
+	}
 	if errors.Is(err, ErrNoPromptText) {
-		LogInfo(EventEnqueueSkipped, mergeLogFields(baseFields, map[string]any{"status": "skipped", "error_code": "no_user_text"}))
+		if !diagnostic.Failed {
+			e.recordExtraction(ExtractionEmpty)
+		}
+		code := "no_user_text"
+		if diagnostic.Failed {
+			code = "no_extracted_content"
+		}
+		LogInfo(EventEnqueueSkipped, mergeLogFields(baseFields, map[string]any{"status": "skipped", "error_code": code}))
 		return nil
 	}
 	if err != nil {
-		e.recordDropped()
-		LogWarn(EventEnqueueDropped, mergeLogFields(baseFields, map[string]any{"status": "dropped", "error_code": "snapshot_invalid"}))
+		if !diagnostic.Failed {
+			e.recordExtraction(ExtractionFailed)
+			logPromptExtractionFailure(req, promptExtractionDiagnostic{Failed: true, ErrorCode: "content_extraction_failed"})
+		}
+		LogInfo(EventEnqueueSkipped, mergeLogFields(baseFields, map[string]any{"status": "skipped", "error_code": "snapshot_invalid"}))
 		return nil
+	}
+	if !diagnostic.Failed {
+		e.recordExtraction(ExtractionSucceeded)
 	}
 	job, err := e.repo.CreateStagingWithCapacity(ctx, snapshot.Redacted(), cfg.ConfigVersion, 3, cfg.QueueCapacity)
 	if err != nil {
@@ -95,5 +118,11 @@ func (e *Enqueuer) Enqueue(ctx context.Context, req Request) error {
 func (e *Enqueuer) recordDropped() {
 	if e != nil && e.metrics != nil {
 		e.metrics.IncDropped()
+	}
+}
+
+func (e *Enqueuer) recordExtraction(outcome ExtractionOutcome) {
+	if e.metrics != nil {
+		e.metrics.ObserveExtraction(outcome)
 	}
 }

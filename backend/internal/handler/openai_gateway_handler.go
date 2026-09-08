@@ -426,6 +426,39 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 
 	setOpsRequestContext(c, "", false)
+	securityAuditBody := append([]byte(nil), body...)
+	if !gjson.ValidBytes(securityAuditBody) {
+		logRequestBodyParseFailure(reqLog, securityAuditBody, nil)
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+		return
+	}
+	auditModelResult := gjson.GetBytes(securityAuditBody, "model")
+	if !auditModelResult.Exists() || auditModelResult.Type != gjson.String || auditModelResult.String() == "" {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		return
+	}
+	auditModel := auditModelResult.String()
+	ensureCompositeTargetPlatform(c, apiKey, auditModel)
+	if !openAICompatibleTextTargetAllowed(c, apiKey, auditModel) {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
+		return
+	}
+	auditStream, auditStreamOK := parseOpenAICompatibleStream(securityAuditBody)
+	if !auditStreamOK {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", invalidStreamFieldTypeMessage)
+		return
+	}
+	if _, err := service.ValidateOpenAIServiceTierField(securityAuditBody); err != nil {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	setOpsRequestContext(c, auditModel, auditStream)
+	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(auditStream, false)))
+	if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, auditModel, securityAuditBody); decision != nil && !decision.AllowNextStage {
+		h.openAISecurityAuditError(c, decision)
+		return
+	}
+
 	sessionHashBody := body
 	body, ok = h.normalizeOpenAIResponsesCompactRequest(c, reqLog, body)
 	if !ok {
@@ -531,11 +564,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
-
-	if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, body); decision != nil && !decision.AllowNextStage {
-		h.openAISecurityAuditError(c, decision)
-		return
-	}
 
 	// 使用 IsExplicitImageGenerationIntent 排除被动 image_gen namespace 声明。
 	// Codex 在所有请求中被动声明 image_gen namespace，宽泛检测会导致禁了生图的
@@ -2773,16 +2801,20 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if model == "" {
 					model = reqModel
 				}
-				// 分组级模型白名单：后续 turn 同样校验客户端模型（省略 model 时
-				// 沿用会话实际生效模型，含 session.update 轮换后的模型），不通过
-				// 则关闭整条连接，与推理强度 deny 一致。实际生效模型始终参与校验；
-				// 帧内重复 model 键/大小写变体/嵌套 session.model 额外逐一校验，
-				// 防止候选集非空时掩盖被轮换掉的禁用模型。
-				candidates := append([]string{model}, requestmodel.FromBodyCandidates("", "application/json", payload)...)
-				if blocked := blockedModelAllowlistCandidate(apiKey.Group, candidates); blocked != "" {
-					service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
-					middleware2.MarkIngressRejected(c, middleware2.IngressRejectModelNotAllowed)
-					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, fmt.Sprintf("Model %q is not available for this group", blocked), nil)
+				// 分组级模型白名单：后续 response.create turn 同样校验客户端模型
+				// （省略 model 时沿用会话实际生效模型，含 session.update 轮换后的
+				// 模型）。session.update 本身只声明下一轮会话模型，不能在这里立刻
+				// 关闭连接，否则客户端无法收到后续 turn 的一致性错误；轮换后的模型
+				// 会在下一条 response.create 中作为实际生效模型参与校验。帧内重复
+				// model 键/大小写变体/嵌套 session.model 仍逐一校验，防止候选集非空
+				// 时掩盖被轮换掉的禁用模型。
+				if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.create" {
+					candidates := append([]string{model}, requestmodel.FromBodyCandidates("", "application/json", payload)...)
+					if blocked := blockedModelAllowlistCandidate(apiKey.Group, candidates); blocked != "" {
+						service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
+						middleware2.MarkIngressRejected(c, middleware2.IngressRejectModelNotAllowed)
+						return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, fmt.Sprintf("Model %q is not available for this group", blocked), nil)
+					}
 				}
 				if decision := h.checkSecurityAuditStage(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, model, payload, "subsequent_turn"); decision != nil && !decision.AllowNextStage {
 					writeSecurityAuditWSError(ctx, wsConn, decision)

@@ -36,6 +36,9 @@ vi.mock('@/api/admin', () => ({
       testAPIKeys: vi.fn(),
       deleteFlaggedHash: vi.fn(),
       clearFlaggedHashes: vi.fn(),
+      listSessionBlocks: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 1 }),
+      deleteSessionBlock: vi.fn(),
+      clearSessionBlocks: vi.fn(),
       unbanUser: vi.fn(),
     },
     groups: {
@@ -84,6 +87,13 @@ const baseConfig = (): ContentModerationConfig => ({
   api_key_count: 0,
   api_key_masks: [],
   api_key_statuses: [],
+  endpoints: [{
+    id: 'default', name: 'OpenAI', enabled: true, priority: 1,
+    base_url: 'https://api.openai.com', model: 'omni-moderation-latest', proxy_id: null,
+    api_key_configured: false, api_key_count: 0, api_key_masks: [], api_key_statuses: [],
+    timeout_ms: 3000, cooldown_seconds: 60, failure_threshold: 1, manual_paused: false,
+    runtime: { status: 'healthy', failure_count: 0, last_error: '', half_open: false },
+  }],
   timeout_ms: 3000,
   sample_rate: 100,
   all_groups: true,
@@ -95,14 +105,18 @@ const baseConfig = (): ContentModerationConfig => ({
   block_message: '内容审计命中风险规则，请调整输入后重试',
   email_on_hit: true,
   auto_ban_enabled: true,
+  cyber_policy_auto_ban_enabled: false,
   ban_threshold: 10,
   violation_window_hours: 720,
   retry_count: 2,
   hit_retention_days: 180,
   non_hit_retention_days: 3,
   pre_hash_check_enabled: false,
+  session_block_enabled: false,
+  session_block_ttl_seconds: 2592000,
   blocked_keywords: [],
   keyword_blocking_mode: 'keyword_and_api',
+  text_api_mode: 'blocking',
   thresholds: {
     harassment: 0.98,
     sexual: 0.65,
@@ -117,6 +131,7 @@ const runtimeStatus = () => ({
   enabled: true,
   risk_control_enabled: true,
   mode: 'pre_block',
+  text_api_mode: 'blocking',
   worker_count: 4,
   max_workers: 32,
   active_workers: 0,
@@ -128,6 +143,10 @@ const runtimeStatus = () => ({
   dropped: 0,
   processed: 0,
   errors: 0,
+  extraction_attempted: 0,
+  extraction_succeeded: 0,
+  extraction_empty: 0,
+  extraction_failed: 0,
   pre_block_active: 0,
   pre_block_checked: 0,
   pre_block_allowed: 0,
@@ -139,7 +158,9 @@ const runtimeStatus = () => ({
   pre_block_api_key_total_calls: 0,
   pre_block_api_key_loads: [],
   api_key_statuses: [],
+  endpoints: baseConfig().endpoints,
   flagged_hash_count: 0,
+  blocked_session_count: 0,
   last_cleanup_deleted_hit: 0,
   last_cleanup_deleted_non_hit: 0,
 })
@@ -243,6 +264,7 @@ describe('admin RiskControlView', () => {
     await flushPromises()
 
     expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+      text_api_mode: 'blocking',
       model_filter: {
         type: 'include',
         models: ['gpt-5.5', 'gpt-5.4'],
@@ -326,6 +348,10 @@ describe('admin RiskControlView', () => {
       pre_block_blocked: 8,
       pre_block_errors: 1,
       pre_block_avg_latency_ms: 86,
+      extraction_attempted: 129,
+      extraction_succeeded: 128,
+      extraction_empty: 0,
+      extraction_failed: 1,
       pre_block_api_key_active: 2,
       pre_block_api_key_available_count: 2,
       pre_block_api_key_total_calls: 128,
@@ -392,6 +418,12 @@ describe('admin RiskControlView', () => {
     expect(wrapper.text()).toContain('72')
     expect(wrapper.text()).toContain('56')
     expect(wrapper.text()).toContain('同步并发 2 / 可用 Key 2，累计 128 次，worker：3 / 7')
+    expect(wrapper.get('[data-test="content-extraction-runtime"]').text()).toContain('admin.riskControl.extractionStatus')
+    expect(wrapper.get('[data-test="content-extraction-metric-attempted"]').text()).toContain('129')
+    expect(wrapper.get('[data-test="content-extraction-metric-succeeded"]').text()).toContain('128')
+    expect(wrapper.get('[data-test="content-extraction-metric-empty"]').text()).toContain('0')
+    expect(wrapper.get('[data-test="content-extraction-metric-failed"]').text()).toContain('1')
+    expect(wrapper.get('[data-test="content-extraction-metric-failed"] dd').classes()).toContain('text-red-700')
 
     const runtimeCards = wrapper.get('[data-test="pre-block-runtime-cards"]')
     const syncCard = wrapper.get('[data-test="pre-block-sync-card"]')
@@ -414,5 +446,60 @@ describe('admin RiskControlView', () => {
       'max-h-[280px]',
       'overflow-y-auto',
     ]))
+  })
+
+  it('shows the effective policy matrix and the migrated endpoint pool', async () => {
+    const wrapper = mount(RiskControlView, {
+      global: {
+        stubs: {
+          AppLayout: AppLayoutStub,
+          BaseDialog: BaseDialogStub,
+          Icon: true,
+          Select: true,
+          Toggle: true,
+          Pagination: true,
+          ModelWhitelistSelector: ModelWhitelistSelectorStub,
+          ProxySelector: true,
+        },
+      },
+    })
+
+    await flushPromises()
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+
+    expect(wrapper.get('[data-test="moderation-endpoint-pool"]').text()).toContain('admin.riskControl.endpointPool.title')
+    expect(wrapper.get('[data-test="moderation-effective-behavior"]').text()).toContain('admin.riskControl.policyHelp.combinations.pre_block.blocking')
+
+    await wrapper.get('button[aria-label="admin.riskControl.policyHelp.open"]').trigger('click')
+    expect(wrapper.text()).toContain('admin.riskControl.policyHelp.combinations.observe.blocking')
+    expect(wrapper.text()).toContain('admin.riskControl.policyHelp.combinations.off.any')
+  })
+
+  it('shows moderation platform attribution and warning endpoint health', async () => {
+    const config = baseConfig()
+    config.endpoints[0]!.runtime = { status: 'degraded', failure_count: 1, last_error: 'http_500', half_open: false }
+    getConfig.mockResolvedValue(config)
+    getStatus.mockResolvedValue({ ...runtimeStatus(), endpoints: config.endpoints })
+    listLogs.mockResolvedValue({
+      items: [{
+        id: 1, request_id: 'req-1', user_id: 7, user_email: 'user@example.test', api_key_id: 9, api_key_name: 'Key',
+        group_id: 3, group_name: 'Default', moderation_endpoint_id: 'default', moderation_endpoint_name: 'OpenAI Moderation',
+        endpoint: '/v1/responses', provider: 'openai', model: 'gpt-5', mode: 'pre_block', action: 'allow', flagged: false,
+        highest_category: 'harassment', highest_score: 0.1, matched_keyword: '', category_scores: {}, threshold_snapshot: {},
+        input_excerpt: 'hello', input_content: 'hello full scan window', input_content_truncated: false, upstream_latency_ms: 12, error: '', violation_count: 0, auto_banned: false, email_sent: false,
+        user_status: 'active', queue_delay_ms: null, created_at: '2026-08-30T00:00:00Z',
+      }],
+      total: 1, page: 1, page_size: 20, pages: 1,
+    })
+    const wrapper = mount(RiskControlView, {
+      global: { stubs: { AppLayout: AppLayoutStub, BaseDialog: BaseDialogStub, Icon: true, Select: true, Toggle: true, Pagination: true, ModelWhitelistSelector: ModelWhitelistSelectorStub, ProxySelector: true } },
+    })
+
+    await flushPromises()
+    expect(wrapper.text()).toContain('OpenAI Moderation')
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    const pool = wrapper.get('[data-test="moderation-endpoint-pool"]')
+    expect(pool.text()).toContain('admin.riskControl.endpointPool.status.degraded')
+    expect(pool.find('.bg-amber-50').exists()).toBe(true)
   })
 })

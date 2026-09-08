@@ -7,6 +7,10 @@ import type {
 } from './types'
 
 export const DEFAULT_GUARD_MODEL = 'sileader/qwen3guard:0.6b'
+export const MIN_GUARD_TIMEOUT_MS = 100
+export const MAX_GUARD_TIMEOUT_MS = 30000
+export const MIN_GUARD_INPUT_LIMIT = 128
+export const MAX_GUARD_INPUT_LIMIT = 100000
 export const CUSTOM_POLICY_CATEGORY = 'custom_policy'
 
 export const SCANNER_CATALOG = [
@@ -21,9 +25,6 @@ export const SCANNER_CATALOG = [
   { id: 'jailbreak', label: 'Jailbreak' },
 ] as const
 
-// Vue props/refs are proxies and cannot be passed to structuredClone in every
-// browser. Prompt Audit state is JSON-only, so this produces a detached draft
-// without retaining reactive proxies or browser storage references.
 export function cloneData<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
@@ -97,17 +98,8 @@ export function draftFingerprint(draft: PromptAuditDraft | null): string {
 
 export function emptyEventFilters(): PromptEventFilters {
   return {
-    decision: '',
-    risk_level: '',
-    endpoint: '',
-    group_id: '',
-    user_id: '',
-    api_key_id: '',
-    request_id: '',
-    prompt_hash: '',
-    keyword: '',
-    start_at: '',
-    end_at: '',
+    decision: '', risk_level: '', endpoint: '', group_id: '', user_id: '', api_key_id: '',
+    request_id: '', client_ip: '', prompt_hash: '', keyword: '', start_at: '', end_at: '',
   }
 }
 
@@ -119,7 +111,7 @@ function toISO(value: string): string | undefined {
 
 export function eventQueryParams(filters: PromptEventFilters): Record<string, string | number> {
   const result: Record<string, string | number> = {}
-  for (const key of ['decision', 'risk_level', 'endpoint', 'request_id', 'prompt_hash', 'keyword'] as const) {
+  for (const key of ['decision', 'risk_level', 'endpoint', 'request_id', 'client_ip', 'prompt_hash', 'keyword'] as const) {
     const value = filters[key].trim()
     if (value) result[key] = value
   }
@@ -145,21 +137,12 @@ export function hasExplicitDeleteRange(filters: PromptEventFilters): boolean {
 }
 
 export type DeleteRangePreset = '1d' | '7d' | '30d' | '90d' | 'all' | 'custom'
-
 export const DELETE_RANGE_PRESETS: ReadonlyArray<{ id: DeleteRangePreset; days: number | null }> = [
-  { id: '1d', days: 1 },
-  { id: '7d', days: 7 },
-  { id: '30d', days: 30 },
-  { id: '90d', days: 90 },
-  { id: 'all', days: null },
-  { id: 'custom', days: null },
+  { id: '1d', days: 1 }, { id: '7d', days: 7 }, { id: '30d', days: 30 },
+  { id: '90d', days: 90 }, { id: 'all', days: null }, { id: 'custom', days: null },
 ]
-
 const DAY_MS = 24 * 60 * 60 * 1000
 
-// Presets delete events older than the chosen cutoff: the range always starts
-// at the epoch and ends at (now - days) so the backend's explicit-range
-// requirement is satisfied without asking the user for a begin date.
 export function resolveDeleteRangeFilters(
   filters: PromptEventFilters,
   preset: DeleteRangePreset,

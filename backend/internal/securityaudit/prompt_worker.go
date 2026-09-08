@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 type WorkerRuntime struct {
@@ -14,6 +15,7 @@ type WorkerRuntime struct {
 	failed           atomic.Int64
 	heartbeatNS      atomic.Int64
 	lastProcessedNS  atomic.Int64
+	lastErrorNS      atomic.Int64
 	lastErrorMu      sync.RWMutex
 	lastErrorCode    string
 	lastErrorMessage string
@@ -39,6 +41,7 @@ func NewRunner(config ConfigStore, repo JobRepository, payload PayloadStore, sca
 
 func (r *Runner) Start(ctx context.Context) error {
 	if r == nil || r.config == nil || r.repo == nil || r.payload == nil || r.scanner == nil {
+		logPromptRuntimeFailure(EventProcessFailed, "worker_dependencies_unavailable")
 		return errors.New("prompt audit worker dependencies unavailable")
 	}
 	r.mu.Lock()
@@ -51,6 +54,7 @@ func (r *Runner) Start(ctx context.Context) error {
 	r.mu.Unlock()
 	if err := r.payload.Ping(runCtx); err != nil {
 		r.setLastError("payload_store_unavailable", err.Error())
+		logPromptRuntimeFailure(EventProcessFailed, "payload_store_unavailable")
 	}
 	for workerID := 0; workerID < MaxWorkerCount; workerID++ {
 		r.wg.Add(1)
@@ -78,7 +82,9 @@ func (r *Runner) Shutdown(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		LogWarn(EventProcessFailed, map[string]any{"status": "shutdown_timeout", "error_code": "worker_shutdown_timeout"})
+		LogWarn(EventProcessFailed, mergeLogFields(promptRuntimeLogFields(), map[string]any{
+			"status": "shutdown_timeout", "error_code": "worker_shutdown_timeout", "error_kind": "audit_dependency",
+		}))
 		return ctx.Err()
 	}
 }
@@ -101,6 +107,7 @@ func (r *Runner) worker(ctx context.Context, workerID int) {
 				job, claimed, err := r.repo.ClaimNextJob(ctx, r.clock.Now())
 				if err != nil {
 					r.setLastError("claim_job_failed", err.Error())
+					logPromptRuntimeFailure(EventProcessFailed, "claim_job_failed")
 					break
 				}
 				if !claimed {
@@ -143,30 +150,38 @@ func (r *Runner) processJob(ctx context.Context, workerID int, cfg ActiveConfig,
 	// The job row only carries redacted metadata; the full prompt for the audit
 	// event is reconstructed here from the transient scan payload.
 	job.Snapshot.FullPrompt = FullPromptFromScanText(scanText)
+	job.Snapshot.FullPromptTruncated = utf8.RuneCountInString(job.Snapshot.FullPrompt) < job.Snapshot.PromptLength
 	endpoints := cfg.EnabledEndpoints()
 	if len(endpoints) == 0 {
 		return r.finishFailure(ctx, job, &GuardError{Code: "no_enabled_endpoint", Retryable: true})
 	}
-	chunks := SplitRunes(scanText, minimumInputLimit(endpoints))
+	inputLimit := minimumInputLimit(endpoints)
+	chunks := SplitRunes(scanText, inputLimit)
 	results := make([]*NormalizedResult, 0, len(chunks))
 	started := r.clock.Now()
 	for index, chunk := range chunks {
 		if err := r.repo.RefreshLease(ctx, job.ID, job.ClaimVersion, r.clock.Now()); err != nil {
+			r.setLastError("lease_refresh_failed", err.Error())
+			LogWarn(EventProcessFailed, mergeLogFields(baseFields, map[string]any{
+				"worker_id": workerID, "status": "failed", "error_code": "lease_refresh_failed", "error_kind": "audit_dependency",
+			}))
 			return err
 		}
 		chunkStarted := r.clock.Now()
-		LogInfo(EventChunkStarted, mergeLogFields(baseFields, map[string]any{"worker_id": workerID, "chunk_index": index + 1, "chunk_total": len(chunks), "chunk_chars": len([]rune(chunk)), "input_chars": job.Snapshot.PromptLength, "input_limit": minimumInputLimit(endpoints), "status": "started"}))
+		LogInfo(EventChunkStarted, mergeLogFields(baseFields, map[string]any{"worker_id": workerID, "chunk_index": index + 1, "chunk_total": len(chunks), "chunk_chars": len([]rune(chunk)), "input_chars": job.Snapshot.PromptLength, "input_limit": inputLimit, "status": "started"}))
 		result, scanErr := scanWithFailover(ctx, r.scanner, cfg.Scanners, endpoints, chunk, r.metrics)
 		if scanErr != nil {
 			LogWarn(EventChunkFailed, mergeLogFields(baseFields, map[string]any{
 				"worker_id": workerID, "chunk_index": index + 1, "chunk_total": len(chunks),
 				"chunk_chars": len([]rune(chunk)), "input_chars": job.Snapshot.PromptLength,
-				"input_limit": minimumInputLimit(endpoints), "latency_ms": r.clock.Now().Sub(chunkStarted).Milliseconds(),
+				"input_limit": inputLimit, "latency_ms": r.clock.Now().Sub(chunkStarted).Milliseconds(),
 				"error_code": guardErrorCode(scanErr), "status": "failed",
 			}))
 			r.observeAsyncFailure(scanErr, r.clock.Now().Sub(started))
 			return r.finishFailure(ctx, job, scanErr)
 		}
+		result.InputLimit = inputLimit
+		result.MatchedChunkIndex = index + 1
 		results = append(results, result)
 		LogInfo(EventChunkCompleted, mergeLogFields(baseFields, map[string]any{"worker_id": workerID, "chunk_index": index + 1, "chunk_total": len(chunks), "guard_endpoint_id": result.GuardEndpointID, "action": result.Action, "latency_ms": r.clock.Now().Sub(chunkStarted).Milliseconds(), "status": "completed"}))
 		if result.Action == ActionBlock {
@@ -180,6 +195,7 @@ func (r *Runner) processJob(ctx context.Context, workerID int, cfg ActiveConfig,
 		}
 		return r.finishFailure(ctx, job, &GuardError{Code: ErrorCodeInvalidResponse, Cause: err})
 	}
+	aggregated.InputLimit = inputLimit
 	aggregated.ChunkTotal = len(chunks)
 	if r.metrics != nil {
 		r.metrics.Observe(decisionKindForResult(aggregated), r.clock.Now().Sub(started))
@@ -191,6 +207,10 @@ func (r *Runner) processJob(ctx context.Context, workerID int, cfg ActiveConfig,
 	}))
 	event, err := r.repo.Complete(ctx, job, aggregated, cfg.StorePassEvents)
 	if err != nil {
+		r.setLastError("job_complete_failed", err.Error())
+		LogWarn(EventProcessFailed, mergeLogFields(baseFields, map[string]any{
+			"worker_id": workerID, "status": "failed", "error_code": "job_complete_failed", "error_kind": "audit_dependency",
+		}))
 		return err
 	}
 	if deleteErr := r.payload.Delete(ctx, job.ID); deleteErr != nil {
@@ -243,11 +263,21 @@ func (r *Runner) finishFailure(ctx context.Context, job *Job, err error) error {
 	if retryable && job.Attempts < job.MaxAttempts {
 		next := r.clock.Now().Add(retryBackoff(job.Attempts))
 		if updateErr := r.repo.Retry(ctx, job.ID, job.ClaimVersion, next, code, "prompt guard temporarily unavailable"); updateErr != nil {
+			r.setLastError("job_retry_failed", updateErr.Error())
+			LogWarn(EventProcessFailed, mergeLogFields(baseFields, map[string]any{
+				"attempts": job.Attempts, "max_attempts": job.MaxAttempts, "status": "failed",
+				"error_code": "job_retry_failed", "error_kind": "audit_dependency",
+			}))
 			return updateErr
 		}
 		LogWarn(EventProcessFailed, mergeLogFields(baseFields, map[string]any{"attempts": job.Attempts, "max_attempts": job.MaxAttempts, "status": "retry", "error_code": code, "retryable": true}))
 	} else {
 		if updateErr := r.repo.Fail(ctx, job.ID, job.ClaimVersion, code, "prompt guard processing failed"); updateErr != nil {
+			r.setLastError("job_fail_failed", updateErr.Error())
+			LogWarn(EventProcessFailed, mergeLogFields(baseFields, map[string]any{
+				"attempts": job.Attempts, "max_attempts": job.MaxAttempts, "status": "failed",
+				"error_code": "job_fail_failed", "error_kind": "audit_dependency",
+			}))
 			return updateErr
 		}
 		_ = r.payload.Delete(ctx, job.ID)
@@ -270,6 +300,7 @@ func (r *Runner) reclaimer(ctx context.Context) {
 			count, err := r.repo.ReclaimStale(ctx, now.Add(-2*time.Minute), now.Add(-90*time.Second), 100)
 			if err != nil {
 				r.setLastError("reclaim_failed", err.Error())
+				logPromptRuntimeFailure(EventProcessFailed, "reclaim_failed")
 				continue
 			}
 			if count > 0 {
@@ -298,11 +329,23 @@ func (r *Runner) Snapshot() (active, processed, failed int64, heartbeat, lastPro
 	return
 }
 
+func (r *Runner) LastErrorAt() *time.Time {
+	if r == nil {
+		return nil
+	}
+	if ns := r.runtime.lastErrorNS.Load(); ns > 0 {
+		value := time.Unix(0, ns).UTC()
+		return &value
+	}
+	return nil
+}
+
 func (r *Runner) setLastError(code, _ string) {
 	code, message := sanitizeStoredError(code)
 	r.runtime.lastErrorMu.Lock()
 	r.runtime.lastErrorCode = code
 	r.runtime.lastErrorMessage = message
+	r.runtime.lastErrorNS.Store(r.clock.Now().UnixNano())
 	r.runtime.lastErrorMu.Unlock()
 }
 
