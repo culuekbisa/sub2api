@@ -19,5 +19,7 @@ func TestModerationAsyncImageObservabilityMigrationAddsDurableMetadata(t *testin
 	} {
 		require.Contains(t, text, column)
 	}
+	require.Contains(t, text, "ALTER TABLE IF EXISTS async_image_tasks")
+	require.Contains(t, text, "to_regclass('public.async_image_tasks')")
 	require.Contains(t, text, "jsonb_array_length(result->'data')")
 }
