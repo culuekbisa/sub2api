@@ -1,0 +1,286 @@
+# Security Audit Content Coverage
+
+This document is the normative content-extraction matrix for Content
+Moderation and Prompt Audit. The shared implementation is
+`backend/internal/auditcontent`; protocol handlers and account paths must not
+maintain alternate text extractors.
+
+## Boundary And Ordering
+
+Every accepted HTTP request, WebSocket turn, and Live Sideband client frame
+must cross the same security-audit boundary after authentication and basic
+request validation, but before:
+
+1. account selection or API-key/OAuth credential normalization;
+2. billing, quota reservation, or concurrency acquisition;
+3. routing, retry, probe, fingerprint, or protocol transformations; and
+4. any upstream request or frame write.
+
+Session affinity, account type, inbound role labels, envelope `type` values,
+and protocol adapters cannot bypass the audit hook. Extraction remains
+compatible with `v0.1.177+custom.003`: unsupported or unrecognized content may
+produce no audit input and pass through, while every successfully extracted
+sibling segment remains auditable.
+
+## Canonical Result
+
+The shared extractor returns a protocol-independent document containing text
+segments and image inputs. Both carry `Role`, `Source`, `Current`, and
+`ClientControlled`; the document also carries `ContentBearing` and `Incomplete`
+classifications.
+
+- `Current` identifies the new content in this request or turn. Consecutive
+  trailing tool results are all current.
+- `ClientControlled` is independent of the claimed role. A current
+  `assistant` or `model` message remains client-controlled inbound content.
+- Structured tool arguments and results are encoded as deterministic JSON.
+- Recognized media blocks are explicit no-text content. Images remain in the
+  canonical result with the same role, source, and current-turn attribution as
+  their containing item. Prompt Audit does not scan URLs or encoded media as
+  prompt text. Structured results are sanitized before text
+  serialization so image/file URLs, data URLs, long base64 payloads, encrypted
+  compaction data, screenshots, and image-generation results are not persisted;
+  ordinary text beside those fields remains auditable.
+- Any non-empty recognized content item that cannot be completely normalized
+  may set `Incomplete` for metrics and structured logs. `Incomplete` does not
+  discard successfully extracted sibling segments and does not itself block,
+  return an unavailable decision, or change an empty selection into a policy
+  violation.
+
+## Protocol Matrix
+
+| Protocol family | Canonical text sources | Current-content rule | Explicit no-text or control cases |
+| --- | --- | --- | --- |
+| OpenAI Chat Completions | `instructions`; `tools` and `functions`; `messages[].content`; `messages[].reasoning_content`; `tool_calls[].function.arguments`; `function_call.arguments`; tool/function-role results, including structured content | Last message is current; if the tail contains tool/function results, every consecutive trailing result is current; system/developer context is current audit context. Assistant reasoning is classified as reasoning, while user-role reasoning retains direct-user attribution. | Recognized image/video content blocks |
+| Anthropic Messages | `system`; `tools`; message text and thinking text; client/server tool-use input; tool-result content, including structured content | Last message is current; system and tool definitions remain current audit context | Recognized image blocks and encrypted `redacted_thinking` blocks |
+| OpenAI Responses HTTP and WebSocket | Top-level, `response`-nested, or session-update `instructions`, `tools`, native `input`, legacy Chat-shaped `messages`, legacy string `prompt`, and reusable `prompt.variables`; message/reasoning/refusal text; visible `compaction`, `compaction_summary`, and `compaction_trigger` fields; function/custom/tool-search outputs; local/hosted shell, apply-patch, computer, MCP, code-interpreter, program/program-output, additional-tools, and accepted search call payloads. `POST /v1/responses/input_tokens` uses the same Responses document before any token-count account selection. Fast `service_tier` is a routing/billing field and does not bypass the audit hook. | A present non-null native `input` takes precedence over legacy `messages` and string `prompt`; otherwise `messages` precedes `prompt`. Last input item is current; every consecutive trailing recognized output is current; `tool_search_output.tools` and other dynamic definitions are current context; a claimed system/developer role remains context and all other current roles remain client-controlled. | Encrypted compaction content, IDs, status, fingerprints, recognized media/opaque items, and control envelopes produce no text; unknown frames, item types, sibling fields, and valid-JSON unrecognized structures pass through without an audit-derived block |
+| OpenAI Live | Initial session instructions, tools, input, legacy `input_audio_transcription.prompt`/`keywords`, current `audio.input.transcription.prompt`/`keywords`; `session.update`; `transcription_session.update`; `conversation.item.create`; Live-shaped `response.create` | Every initial HTTP session and accepted Sideband client frame enters the audit hook before its downstream side effect or upstream write | Known control events and unknown frames, session/config fields, item types, or valid-JSON structures may produce no audit input and pass through without an audit-derived close |
+| Alpha Search | Deterministically serialized, media-sanitized `commands`, `settings`, and top-level `input`, including `commands.search_query[].q` and Responses-shaped input items | Every extracted value is current; Responses-shaped input retains its item attribution. Successfully extracted siblings remain auditable when another field is incomplete. | Empty collections and media-only values; URLs, base64 payloads, and opaque media fields are omitted from structured text |
+| OpenAI Embeddings | String or string-array `input` | Every string input is current | Empty input and unsupported token-ID arrays produce no audit text and pass through |
+| Gemini | `systemInstruction`/`system_instruction`; tools; `contents`/`content`; batched `requests`; `instances[].prompt`; part text; `functionCall` arguments; `functionResponse.response` | Last content item is current; system and tools remain current audit context | `inlineData`/`fileData` media-only parts |
+| Images and media | Deterministic prompt-like keys such as prompt, description, query, lyrics, negative prompt, and input | Every extracted prompt is current; duplicate text is emitted once | HTTP(S) URLs, `data:image`/`data:video` values, and large base64-like media payloads |
+
+For unknown protocol labels, the fallback recognizes Chat-shaped `messages`,
+Responses-shaped `input` or `instructions`, Gemini-shaped content, Alpha
+Search commands, and finally the media prompt allowlist. Unrecognized values
+pass through; a newly accepted content field needs an explicit adapter before
+it becomes auditable by both engines.
+
+An envelope `type` value or empty top-level field never overrides content
+present elsewhere in the payload. In particular, a non-`response.create` type
+carrying `input`, `instructions`, or nested `response.input` is still
+content-bearing, and top-level plus nested Responses fields are both inspected.
+An unsupported envelope type is still counted and safely logged as an
+extraction failure even when those sibling fields are extracted successfully.
+Likewise, a media type label does not suppress recognized text in the same
+content block. Unknown sibling keys are ignored, and unsupported item types,
+unknown Responses/Live frames, valid-JSON unrecognized structures, and other
+incomplete or unextractable content pass through. Successfully extracted
+sibling content remains available to both engines. Responses passthrough and
+Live Sideband still invoke the audit hook before every upstream frame write;
+an extraction failure alone does not prevent that write.
+
+A non-empty Responses or Live root, nested `response`, or session object
+containing no recognized request, control, content, or metadata field is an observable
+extraction failure rather than an ordinary empty request. Both engines count
+and safely log that failure before allowing it. Unknown sibling keys remain
+ignored when the containing object has at least one recognized field.
+
+Call-less Codex automation and delegation bootstrap items are a documented
+Responses exception to ordinary tool-output attribution. When the shared strict
+wire validator confirms the supported namespace/name, envelope, missing call
+anchor, unique JSON-member, and empty `previous_response_id` requirements, the
+canonical extractor classifies the output as a current client-controlled user
+message because the post-audit protocol adapter sends that exact text upstream
+as `role=user`. Ordinary function/tool outputs, unsafe or ambiguous bootstrap
+shapes, and outputs with a real call/reference anchor remain tool output and are
+excluded by both engines. The handler still audits the immutable inbound bytes
+before applying the actual request transform.
+
+Anthropic and Bedrock `fallbacks` are outbound routing/control fields rather
+than prompt text. Sanitizing them for upstream beta compatibility happens only
+after ingress audit; recognized message, system, and tool-definition siblings
+retain the canonical attribution in the protocol matrix above.
+
+## Engine Selection
+
+Both engines consume the same canonical document:
+
+| Engine/mode | Segment selection |
+| --- | --- |
+| Content Moderation | Scans only current direct-user text and images. Chat and Anthropic require an explicit `user` role; Responses, Live, and Gemini also accept their protocol-defined roleless user forms. Direct Alpha Search queries, embedding strings, and media prompts remain eligible. Instructions, system/developer context, reusable prompt variables, assistant/model messages, reasoning, tool definitions/calls/results, approval responses, and tool-produced images are excluded so platform or external content is not attributed to the user. |
+| Prompt Audit full/async | Scans the client-controlled transcript: user messages (including role-less Responses/Gemini/embeddings/media forms), plus system/developer/instructions, assistant/model text, reasoning, tool definitions/calls/results, reusable prompt variables, search queries, embedding strings, and media prompts. Stored full prompt and redacted preview remain newest-to-oldest so the preview head is the latest turn. Client harness XML blocks inside user text (`environment_context`, `permission_profile`, `system-reminder`, `filesystem`) are stripped; surrounding user sentences remain. |
+| Prompt Audit blocking latest-turn-only | When enabled, scans the latest user text after the same client-harness XML strip, plus the nearest preceding assistant/model turn so continuation jailbreaks cannot drop the prior output. Older user turns, instructions, and tool schema stay out of this narrow window. A request with no user text cannot be narrowed safely and falls back to the full client-controlled transcript. |
+
+Sharing a canonical document does not mean that the engines select identical
+segments. Content Moderation preserves the `v0.1.177+custom.003` attribution
+rule: only a direct user submission may produce a user content-policy
+violation. Prompt Audit Guard scans the client-controlled transcript, so
+jailbreak text in system/developer/assistant/tool fields remains visible to
+blocking and async review. Ordinary user `hi` still blocks when that text
+itself is a jailbreak. Client wrapper XML such as `<environment_context>`
+inside a user message is stripped so sentences like `你能做什么？` are scanned
+without the harness block. A turn containing only instructions, a tool
+result, or tool schema is still Prompt Audit content; a request with no
+recognized client-controlled text remains an empty selection. Incomplete canonical extraction is
+observable but does not override either engine's selection policy: extracted
+content is still evaluated, while an empty selection passes through.
+
+Content Moderation list rows keep a 240-rune redacted `input_excerpt`. The
+admin detail view stores `input_content` as the same current-user scan window
+sent to the external Moderation API: at most 12,000 runes after secret
+redaction and NUL stripping. `input_content_truncated` is true only when the
+text passed to log persistence still exceeded that window. The live Check
+path normalizes to 12,000 runes before persist, so a longer original prompt
+is stored as the clipped scan window with `input_content_truncated=false`.
+Image URLs and raw request bodies are not persisted as detail text.
+
+Inbound `<system-reminder>` markup is not a trust boundary. Content Moderation
+treats it as ordinary direct-user text. Prompt Audit may still strip known
+client-harness wrapper blocks under its documented selection policy; that
+engine-specific cleanup does not suppress the same text from Content
+Moderation.
+
+## Content Moderation Text Authority
+
+`text_api_mode` controls only the external Moderation API's authority over
+text. Missing, empty, legacy, and invalid values normalize to `blocking`.
+Local keyword checks, pre-hash checks, canonical extraction, and image
+moderation remain independent.
+
+| Text API mode | External text behavior | Image behavior |
+| --- | --- | --- |
+| `blocking` | Follows the global Content Moderation mode and preserves the existing synchronous blocking behavior in `pre_block` | Follows the global mode |
+| `observe` | Runs as shadow comparison only; a finding is logged as `shadow` and cannot block, seed a risk hash, notify, increment violations, or ban/disable an identity | Follows the global mode independently |
+| `off` | Does not call the external API for text | Follows the global mode independently |
+| `auto` | Resolves to `observe` only when active, non-degraded, synchronous Prompt Guard includes the exact request group; otherwise resolves to `blocking` | Follows the global mode independently |
+
+The request-scoped Prompt Guard authority signal is derived inside the audit
+coordinator. Async-only, disabled, degraded, untrusted, and out-of-scope Guard
+configurations never grant text authority. Actions are distinct:
+`hash_block`, `keyword_block`, `block`, `session_block`, `shadow`, and
+`cyber_policy`.
+
+## Content Moderation Session Block
+
+When `session_block_enabled` is true, an API-backed Content Moderation
+`pre_block` decision with `action=block` (text or image threshold hit) records
+the explicit client session ID for `session_block_ttl_seconds` (default 30
+days). Later HTTP and WebSocket turns that present the same tenant-isolated
+session ID are rejected as `session_block` before another Moderation API call,
+account selection, billing, or upstream write.
+
+The block is independent of cyber-policy user bans and of the OpenAI cyber
+session table. Keyword hits, hash blocks, shadow findings, Prompt Guard
+blocks, extraction failures, and missing session IDs never seed it.
+Administrators are blocked for the current request only and are not written
+into the session blacklist. Raw audio frames remain unextractable and are
+not a session-block trigger. Redis is a TTL cache in front of the durable
+table. A cache miss or Redis error falls back to PostgreSQL and, on a live
+row, rehydrates the remaining TTL with `SETNX` so later hits do not extend
+expiry. A Redis hit is confirmed against PostgreSQL; an expired or deleted
+row clears the cache and does not block. If Redis still has the key and
+PostgreSQL is unavailable, the cached hit remains authoritative. A cache
+miss plus a PostgreSQL error fails open. Administrators may list, delete a
+specific tenant-isolated block key, or clear the durable session-block index
+from Risk Control. Deletes and clears write PostgreSQL first, then Redis, so
+a later lookup cannot resurrect a removed block. An active session block
+still rejects later turns even when the current request is outside the
+configured group or model filter.
+
+## Content Moderation Endpoint Failover
+
+External Moderation API calls use enabled endpoints in administrator-defined
+priority order and rotate usable keys inside each endpoint. Retryable transport,
+timeout, 5xx, invalid-response, or exhausted-key failures may place that
+endpoint into cooldown and continue the same audit evaluation with the next
+endpoint. Authentication and rate-limit responses first affect only the
+corresponding key.
+
+Cooldown recovery is passive: expiry never creates probe traffic. The next real
+moderation request performs the single half-open attempt; concurrent requests
+skip that endpoint until the attempt finishes. Manual connection tests are
+administrator actions and do not run on a schedule. Context cancellation and
+canonical extraction failures never penalize endpoint health. If every endpoint
+is unavailable, the existing dependency-failure behavior remains authoritative;
+an unavailable dependency is not converted into a policy violation.
+
+Successful API-backed audit records snapshot the stable moderation endpoint ID
+and its display name so operators can distinguish the platform that actually
+produced the decision after failover. Local keyword/hash decisions, dependency
+failures without a moderation decision, and historical rows keep both values
+empty. Endpoint URLs, API keys, raw content, and unsanitized upstream errors are
+not added to audit records.
+
+## Prompt Audit Operations
+
+Prompt Audit events retain at most 65,536 runes of canonical selected content
+in newest-to-oldest order; `full_prompt_truncated` states whether the retained
+value reached that bound. The redacted preview is taken from the head of that
+newest-first text. The scanner input limit remains at most 100,000 runes per
+chunk. Operational
+metadata includes trusted normalized client IP, prompt length, selected
+message count, execution mode, queue delay, effective input limit, matched
+chunk index, and separate last-success and last-error timestamps. Client IP
+filtering is exact-match. These diagnostics do not create a complete-context
+download API or expand the canonical selection contract.
+
+## Failure Semantics
+
+All enabled engine paths expose `extraction_attempted`,
+`extraction_succeeded`, `extraction_empty`, and `extraction_failed` counters.
+Every extraction, evaluation, or audit-dependency exception emits a structured
+log containing request ID, endpoint, protocol, stage, a stable error
+code/reason, available byte counts, and bounded incomplete reasons. Logs must
+not contain raw content, credentials, or unsanitized user fields. Extraction
+failure is an observability outcome, never a policy violation or an unavailable
+decision.
+
+Content Moderation applies the same log contract to asynchronous persistence,
+hash-cache, account-side-effect, notification, worker, cleanup, runtime, and
+post-upstream cyber-policy failures. These logs use stable error categories;
+they do not include raw dependency errors, panic values, or recipient email
+addresses. Prompt Audit applies it to enqueue, payload-store, job-claim,
+lease-refresh, completion/retry/failure persistence, worker, reclaim, startup,
+shutdown, and runtime health failures.
+
+| Engine/mode | Content-bearing extraction failure |
+| --- | --- |
+| Content Moderation observe | Record failure; evaluate any selected extracted content; otherwise allow |
+| Content Moderation pre-block | Record failure; evaluate any selected extracted content; otherwise allow without HTTP 503 |
+| Prompt Audit async | Record failure; enqueue successfully extracted content or skip an empty snapshot; never affect request forwarding |
+| Prompt Audit blocking | Record failure; evaluate successfully extracted content or allow an empty snapshot without HTTP 503 |
+
+A confirmed policy match continues to use `content_policy_violation` or the
+Prompt Audit block decision. Extraction failure alone must not become a policy
+block, an unavailable decision, HTTP 503, or WebSocket close. Independent audit
+dependency failures retain their documented availability behavior.
+
+Deterministic structured serialization is part of extraction. Sanitization or
+JSON serialization failure may set `Incomplete` and omit that value, but does
+not discard successfully extracted siblings or block the request by itself.
+
+Live Sideband and Responses passthrough are control connections: every client
+text or binary frame enters the audit hook before `upstream.WriteFrame`.
+Unsupported, binary, or otherwise unextractable content passes through unless
+independent transport/basic validation rejects it. WebRTC media does not
+traverse the Sideband control connection and is outside this text-extraction
+boundary.
+
+## Change Evidence
+
+Any endpoint, accepted payload field, tool form, role rule, control event, or
+protocol transform that can affect inbound content must update this matrix in
+the same change and provide all of the following evidence:
+
+- production-shaped shared-extractor tests;
+- the dual-engine contract in
+  `backend/internal/handler/security_audit_content_contract_test.go`;
+- Content Moderation and Prompt Audit payload/selection tests;
+- HTTP and WebSocket ordering tests proving extraction failures pass through,
+  while confirmed policy blocks still produce zero account, billing,
+  concurrency, or upstream side effects; and
+- Live lifecycle tests when Sideband classification or forwarding changes.
+
+Route-call presence or static source-order assertions alone do not prove
+content coverage.

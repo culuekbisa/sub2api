@@ -488,11 +488,25 @@ func (s *OpenAIGatewayService) GetLiveCallForIdentity(
 	return record, nil
 }
 
+// LiveSidebandHooks runs policy checks before a client frame reaches upstream.
+type LiveSidebandHooks struct {
+	BeforeClientFrame func(context.Context, coderws.MessageType, []byte) error
+}
+
 // ProxyLiveSideband 让认证后的客户端接管控制连接；媒体始终不经过这里。
 func (s *OpenAIGatewayService) ProxyLiveSideband(
 	ctx context.Context,
 	record *LiveCallRecord,
 	downstream *coderws.Conn,
+) error {
+	return s.ProxyLiveSidebandWithHooks(ctx, record, downstream, nil)
+}
+
+func (s *OpenAIGatewayService) ProxyLiveSidebandWithHooks(
+	ctx context.Context,
+	record *LiveCallRecord,
+	downstream *coderws.Conn,
+	hooks *LiveSidebandHooks,
 ) error {
 	if record == nil || downstream == nil {
 		return ErrLiveCallNotFound
@@ -530,6 +544,12 @@ func (s *OpenAIGatewayService) ProxyLiveSideband(
 			if readErr != nil {
 				errCh <- readErr
 				return
+			}
+			if hooks != nil && hooks.BeforeClientFrame != nil {
+				if auditErr := hooks.BeforeClientFrame(proxyCtx, messageType, payload); auditErr != nil {
+					errCh <- auditErr
+					return
+				}
 			}
 			if writeErr := upstream.WriteFrame(proxyCtx, messageType, payload); writeErr != nil {
 				errCh <- writeErr

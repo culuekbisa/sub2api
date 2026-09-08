@@ -15,10 +15,12 @@ type fakeLegacyEngine struct {
 	decision *LegacyDecision
 	err      error
 	calls    atomic.Int64
+	last     Request
 }
 
-func (f *fakeLegacyEngine) Check(context.Context, Request) (*LegacyDecision, error) {
+func (f *fakeLegacyEngine) Check(_ context.Context, req Request) (*LegacyDecision, error) {
 	f.calls.Add(1)
+	f.last = req
 	return f.decision, f.err
 }
 
@@ -28,9 +30,11 @@ type fakePromptEngine struct {
 	err       error
 	enqueues  atomic.Int64
 	evaluates atomic.Int64
+	applies   bool
 }
 
-func (f *fakePromptEngine) EffectiveMode() Mode { return f.mode }
+func (f *fakePromptEngine) EffectiveMode() Mode          { return f.mode }
+func (f *fakePromptEngine) BlockingApplies(Request) bool { return f.applies }
 func (f *fakePromptEngine) Enqueue(context.Context, Request) error {
 	f.enqueues.Add(1)
 	return f.err
@@ -38,6 +42,23 @@ func (f *fakePromptEngine) Enqueue(context.Context, Request) error {
 func (f *fakePromptEngine) Evaluate(context.Context, Request) (*PromptDecision, error) {
 	f.evaluates.Add(1)
 	return f.decision, f.err
+}
+
+func TestCoordinatorMarksLegacyTextAuthorityOnlyWhenPromptCoversRequest(t *testing.T) {
+	legacy := &fakeLegacyEngine{decision: &LegacyDecision{Allowed: true}}
+	prompt := &fakePromptEngine{
+		mode: ModeBlocking, applies: true,
+		decision: &PromptDecision{Kind: DecisionAllow, AllowNextStage: true},
+	}
+	decision := NewCoordinator(legacy, prompt).Check(context.Background(), Request{APIKeyID: 7})
+	require.True(t, decision.AllowNextStage)
+	require.True(t, legacy.last.PromptTextAuthority)
+
+	legacy = &fakeLegacyEngine{decision: &LegacyDecision{Allowed: true}}
+	prompt.applies = false
+	decision = NewCoordinator(legacy, prompt).Check(context.Background(), Request{APIKeyID: 7})
+	require.True(t, decision.AllowNextStage)
+	require.False(t, legacy.last.PromptTextAuthority)
 }
 
 func TestCoordinatorModesAndPriority(t *testing.T) {
@@ -56,6 +77,9 @@ func TestCoordinatorModesAndPriority(t *testing.T) {
 		{name: "async only enqueues", mode: ModeAsync, wantKind: DecisionAllow, wantEnqueue: 1},
 		{name: "prompt block", mode: ModeBlocking, prompt: &PromptDecision{Kind: DecisionBlock}, wantKind: DecisionBlock, wantCode: ErrorCodeBlocked, wantEvaluation: 1},
 		{name: "prompt unavailable", mode: ModeBlocking, promptErr: errors.New("down"), wantKind: DecisionUnavailable, wantCode: ErrorCodeUnavailable, wantEvaluation: 1},
+		{name: "legacy unavailable", mode: ModeOff,
+			legacy:   &LegacyDecision{Blocked: true, StatusCode: http.StatusServiceUnavailable, ErrorCode: "content_moderation_unavailable", Message: "legacy unavailable", Action: "error"},
+			wantKind: DecisionUnavailable, wantCode: "content_moderation_unavailable"},
 		{name: "legacy wins both block", mode: ModeBlocking,
 			legacy: &LegacyDecision{Blocked: true, StatusCode: http.StatusForbidden, ErrorCode: "content_policy_violation", Message: "legacy"},
 			prompt: &PromptDecision{Kind: DecisionBlock}, wantKind: DecisionBlock, wantCode: "content_policy_violation", wantEvaluation: 1},
@@ -72,6 +96,36 @@ func TestCoordinatorModesAndPriority(t *testing.T) {
 			require.Equal(t, tt.wantEvaluation, prompt.evaluates.Load())
 		})
 	}
+}
+
+func TestCoordinatorClassifiesLegacyModerationDependencyAsUnavailable(t *testing.T) {
+	legacy := &LegacyDecision{
+		Blocked: true, Flagged: false, StatusCode: http.StatusServiceUnavailable,
+		ErrorCode: "content_moderation_unavailable", Message: "content moderation is temporarily unavailable", Action: "error",
+	}
+	decision := NewCoordinator(
+		&fakeLegacyEngine{decision: legacy},
+		&fakePromptEngine{mode: ModeBlocking, decision: &PromptDecision{Kind: DecisionAllow, AllowNextStage: true}},
+	).Check(context.Background(), Request{})
+
+	require.Equal(t, DecisionUnavailable, decision.Kind)
+	require.Equal(t, http.StatusServiceUnavailable, decision.HTTPStatus)
+	require.Equal(t, "content_moderation_unavailable", decision.ErrorCode)
+	require.Equal(t, "content moderation is temporarily unavailable", decision.ClientMessage)
+	require.False(t, decision.AllowNextStage)
+	require.Same(t, legacy, decision.Legacy)
+}
+
+func TestCoordinatorPromptPolicyBlockWinsLegacyUnavailable(t *testing.T) {
+	decision := NewCoordinator(
+		&fakeLegacyEngine{decision: &LegacyDecision{Blocked: true, StatusCode: http.StatusServiceUnavailable, ErrorCode: "content_moderation_unavailable", Action: "error"}},
+		&fakePromptEngine{mode: ModeBlocking, decision: &PromptDecision{Kind: DecisionBlock}},
+	).Check(context.Background(), Request{})
+
+	require.Equal(t, DecisionBlock, decision.Kind)
+	require.Equal(t, ErrorCodeBlocked, decision.ErrorCode)
+	require.Equal(t, "提示词安全审计拒绝了该请求，请调整输入后重试", decision.ClientMessage)
+	require.False(t, decision.AllowNextStage)
 }
 
 func TestCoordinatorDoesNotMutateRequestBody(t *testing.T) {

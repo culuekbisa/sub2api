@@ -67,20 +67,24 @@ const (
 )
 
 type Request struct {
-	RequestID  string
-	UserID     int64
-	Username   string
-	UserEmail  string
-	APIKeyID   int64
-	APIKeyName string
-	GroupID    *int64
-	GroupName  string
-	Provider   string
-	Endpoint   string
-	Protocol   string
-	Model      string
-	Body       []byte
-	Stage      string
+	RequestID           string
+	ClientIP            string
+	UserID              int64
+	Username            string
+	UserEmail           string
+	APIKeyID            int64
+	APIKeyName          string
+	GroupID             *int64
+	GroupName           string
+	Provider            string
+	Endpoint            string
+	Protocol            string
+	Model               string
+	Body                []byte
+	Stage               string
+	PromptTextAuthority bool
+	SessionID           string
+	AdminUser           bool
 }
 
 func (r Request) Clone() Request {
@@ -93,26 +97,29 @@ func (r Request) Clone() Request {
 }
 
 type PromptSnapshot struct {
-	RequestID          string `json:"request_id"`
-	UserID             int64  `json:"user_id"`
-	UsernameSnapshot   string `json:"username"`
-	UserEmailSnapshot  string `json:"user_email"`
-	APIKeyID           int64  `json:"api_key_id"`
-	APIKeyNameSnapshot string `json:"api_key_name"`
-	GroupID            *int64 `json:"group_id,omitempty"`
-	GroupName          string `json:"group_name"`
-	Provider           string `json:"provider"`
-	Endpoint           string `json:"endpoint"`
-	Protocol           string `json:"protocol"`
-	Model              string `json:"model"`
-	PromptHash         string `json:"prompt_hash"`
-	RedactedPreview    string `json:"redacted_preview"`
-	FullPrompt         string `json:"full_prompt"`
-	PromptLength       int    `json:"prompt_length"`
-	MessageCount       int    `json:"message_count"`
-	Stage              string `json:"stage"`
+	RequestID           string `json:"request_id"`
+	ClientIP            string `json:"client_ip"`
+	UserID              int64  `json:"user_id"`
+	UsernameSnapshot    string `json:"username"`
+	UserEmailSnapshot   string `json:"user_email"`
+	APIKeyID            int64  `json:"api_key_id"`
+	APIKeyNameSnapshot  string `json:"api_key_name"`
+	GroupID             *int64 `json:"group_id,omitempty"`
+	GroupName           string `json:"group_name"`
+	Provider            string `json:"provider"`
+	Endpoint            string `json:"endpoint"`
+	Protocol            string `json:"protocol"`
+	Model               string `json:"model"`
+	PromptHash          string `json:"prompt_hash"`
+	RedactedPreview     string `json:"redacted_preview"`
+	FullPrompt          string `json:"full_prompt"`
+	FullPromptTruncated bool   `json:"full_prompt_truncated"`
+	PromptLength        int    `json:"prompt_length"`
+	MessageCount        int    `json:"message_count"`
+	Stage               string `json:"stage"`
 
-	ScanText string `json:"-"`
+	ScanText  string `json:"-"`
+	BodyBytes int    `json:"-"`
 }
 
 func (s PromptSnapshot) Redacted() PromptSnapshot {
@@ -137,6 +144,8 @@ type NormalizedResult struct {
 	PolicyID          string             `json:"policy_id"`
 	PolicyVersion     int                `json:"policy_version"`
 	ChunkTotal        int                `json:"chunk_total"`
+	InputLimit        int                `json:"input_limit"`
+	MatchedChunkIndex int                `json:"matched_chunk_index"`
 	LatencyMS         int                `json:"latency_ms"`
 	UnknownCategories []string           `json:"unknown_categories,omitempty"`
 }
@@ -217,9 +226,21 @@ type GuardMetricsSnapshot struct {
 }
 
 type AuditMetricsSnapshot struct {
-	Enqueued int64 `json:"enqueued"`
-	Dropped  int64 `json:"dropped"`
+	Enqueued            int64 `json:"enqueued"`
+	Dropped             int64 `json:"dropped"`
+	ExtractionAttempted int64 `json:"extraction_attempted"`
+	ExtractionSucceeded int64 `json:"extraction_succeeded"`
+	ExtractionEmpty     int64 `json:"extraction_empty"`
+	ExtractionFailed    int64 `json:"extraction_failed"`
 }
+
+type ExtractionOutcome string
+
+const (
+	ExtractionSucceeded ExtractionOutcome = "succeeded"
+	ExtractionEmpty     ExtractionOutcome = "empty"
+	ExtractionFailed    ExtractionOutcome = "failed"
+)
 
 type QueueStats struct {
 	Staging    int64 `json:"staging"`
@@ -247,7 +268,12 @@ type RuntimeSnapshot struct {
 	FailedTotal           int64                  `json:"failed_total"`
 	EnqueuedTotal         int64                  `json:"enqueued_total"`
 	DroppedTotal          int64                  `json:"dropped_total"`
+	ExtractionAttempted   int64                  `json:"extraction_attempted"`
+	ExtractionSucceeded   int64                  `json:"extraction_succeeded"`
+	ExtractionEmpty       int64                  `json:"extraction_empty"`
+	ExtractionFailed      int64                  `json:"extraction_failed"`
 	LastProcessedAt       *time.Time             `json:"last_processed_at,omitempty"`
+	LastErrorAt           *time.Time             `json:"last_error_at,omitempty"`
 	LastErrorCode         string                 `json:"last_error_code,omitempty"`
 	LastErrorMessage      string                 `json:"last_error_message,omitempty"`
 	DatabaseStatus        string                 `json:"database_status"`
@@ -270,6 +296,7 @@ type Metrics interface {
 	Observe(kind DecisionKind, latency time.Duration)
 	IncEnqueued()
 	IncDropped()
+	ObserveExtraction(outcome ExtractionOutcome)
 	IncTimeout()
 	IncFailover()
 	IncBulkheadFull()

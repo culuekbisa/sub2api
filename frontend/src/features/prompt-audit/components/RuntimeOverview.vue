@@ -40,6 +40,15 @@
               <p class="mt-0.5 text-sm font-semibold tabular-nums text-gray-900 dark:text-white">{{ metric.value }}</p>
             </div>
           </div>
+          <div data-test="extraction-metrics" class="mt-4 border-t border-gray-100 pt-3 dark:border-dark-700/60">
+            <h4 class="text-xs font-medium text-gray-700 dark:text-dark-200">{{ t('admin.promptAudit.runtime.extractionMetrics') }}</h4>
+            <dl class="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
+              <div v-for="metric in extractionMetricItems" :key="metric.key" :data-test="`extraction-metric-${metric.key}`">
+                <dt class="text-[11px] text-gray-500 dark:text-dark-400">{{ metric.label }}</dt>
+                <dd class="mt-0.5 text-sm font-semibold tabular-nums" :class="metric.valueClass">{{ metric.value }}</dd>
+              </div>
+            </dl>
+          </div>
           <p class="mt-3 text-xs leading-5 text-gray-500 dark:text-dark-400">
             {{ t('admin.promptAudit.runtime.queueBreakdown', {
               queued: runtime.queue.queued,
@@ -54,12 +63,20 @@
         </div>
         <div class="rounded-xl border border-gray-100 px-4 py-3 dark:border-dark-700/60 dark:bg-dark-900/20">
           <h3 class="text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.promptAudit.runtime.latest') }}</h3>
-          <p class="mt-2 text-sm text-gray-600 dark:text-dark-300">
-            {{ runtime.last_processed_at ? formatDate(runtime.last_processed_at) : t('admin.promptAudit.common.never') }}
-          </p>
-          <p v-if="runtime.last_error_code" class="mt-1 break-words text-sm text-red-600 dark:text-red-300">
-            {{ runtime.last_error_code }}<span v-if="runtime.last_error_message"> · {{ runtime.last_error_message }}</span>
-          </p>
+          <dl class="mt-3 space-y-3 text-sm">
+            <div>
+              <dt class="text-xs text-gray-500 dark:text-dark-400">{{ t('admin.promptAudit.runtime.lastProcessed') }}</dt>
+              <dd class="mt-1 text-gray-700 dark:text-dark-200">{{ runtime.last_processed_at ? formatDate(runtime.last_processed_at) : t('admin.promptAudit.common.never') }}</dd>
+            </div>
+            <div>
+              <dt class="text-xs text-gray-500 dark:text-dark-400">{{ t('admin.promptAudit.runtime.lastError') }}</dt>
+              <dd v-if="runtime.last_error_code" class="mt-1 break-words text-red-600 dark:text-red-300">
+                <span v-if="runtime.last_error_at" class="block text-xs text-gray-500 dark:text-dark-400">{{ formatDate(runtime.last_error_at) }}</span>
+                {{ runtime.last_error_code }}<span v-if="runtime.last_error_message"> · {{ runtime.last_error_message }}</span>
+              </dd>
+              <dd v-else class="mt-1 text-gray-700 dark:text-dark-200">{{ t('admin.promptAudit.common.never') }}</dd>
+            </div>
+          </dl>
           <div v-if="Object.keys(runtime.endpoints).length" class="mt-3 flex flex-wrap gap-2">
             <span v-for="(probe, id) in runtime.endpoints" :key="id" class="rounded-md px-2 py-1 text-xs" :class="probe.ok ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300'">
               {{ id }} · {{ probe.status }} · {{ probe.latency_ms }} ms
@@ -105,6 +122,17 @@ const guardMetricItems = computed(() => {
     { label: t('admin.promptAudit.metrics.timeouts'), value: metrics.timeouts },
     { label: t('admin.promptAudit.metrics.failovers'), value: metrics.failovers },
     { label: 'P95', value: metrics.latency_p95_ms != null ? `${metrics.latency_p95_ms} ms` : '—' },
+  ]
+})
+
+const extractionMetricItems = computed(() => {
+  const runtime = props.runtime
+  if (!runtime) return []
+  return [
+    { key: 'attempted', label: t('admin.promptAudit.metrics.extractionAttempted'), value: runtime.extraction_attempted, valueClass: 'text-gray-900 dark:text-white' },
+    { key: 'succeeded', label: t('admin.promptAudit.metrics.extractionSucceeded'), value: runtime.extraction_succeeded, valueClass: 'text-emerald-700 dark:text-emerald-300' },
+    { key: 'empty', label: t('admin.promptAudit.metrics.extractionEmpty'), value: runtime.extraction_empty, valueClass: 'text-gray-900 dark:text-white' },
+    { key: 'failed', label: t('admin.promptAudit.metrics.extractionFailed'), value: runtime.extraction_failed, valueClass: runtime.extraction_failed > 0 ? 'text-red-700 dark:text-red-300' : 'text-gray-900 dark:text-white' },
   ]
 })
 

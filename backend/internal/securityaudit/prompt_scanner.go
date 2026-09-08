@@ -55,6 +55,7 @@ func AggregateResults(results []*NormalizedResult, latency time.Duration) (*Norm
 			aggregated.ScannerVersion = result.ScannerVersion
 			aggregated.PolicyID = result.PolicyID
 			aggregated.PolicyVersion = result.PolicyVersion
+			aggregated.MatchedChunkIndex = result.MatchedChunkIndex
 		}
 		if aggregated.GuardEndpointID == "" {
 			aggregated.ScannerBackend = result.ScannerBackend

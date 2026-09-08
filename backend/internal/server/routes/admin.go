@@ -173,11 +173,16 @@ func registerContentModerationRoutes(admin *gin.RouterGroup, h *handler.Handlers
 		risk.GET("/config", h.Admin.ContentModeration.GetConfig)
 		risk.PUT("/config", h.Admin.ContentModeration.UpdateConfig)
 		risk.POST("/api-keys/test", h.Admin.ContentModeration.TestAPIKeys)
+		risk.POST("/endpoints/:endpoint_id/pause", h.Admin.ContentModeration.PauseEndpoint)
+		risk.POST("/endpoints/:endpoint_id/resume", h.Admin.ContentModeration.ResumeEndpoint)
 		risk.GET("/status", h.Admin.ContentModeration.GetStatus)
 		risk.GET("/logs", h.Admin.ContentModeration.ListLogs)
 		risk.POST("/users/:user_id/unban", h.Admin.ContentModeration.UnbanUser)
 		risk.DELETE("/hashes", h.Admin.ContentModeration.DeleteFlaggedHash)
 		risk.DELETE("/hashes/all", h.Admin.ContentModeration.ClearFlaggedHashes)
+		risk.GET("/sessions", h.Admin.ContentModeration.ListSessionBlocks)
+		risk.DELETE("/sessions", h.Admin.ContentModeration.DeleteSessionBlock)
+		risk.DELETE("/sessions/all", h.Admin.ContentModeration.ClearSessionBlocks)
 	}
 }
 

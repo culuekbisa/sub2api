@@ -980,6 +980,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
 				return payload, nil, nil
 			}
+			// Keep an immutable copy of the client frame for Prompt Audit. The
+			// compatibility, identity, and policy transforms below are outbound
+			// adaptations and must not hide content from the audit gate.
+			auditPayload := payload
 			eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
 			isResponseCreate := eventType == "response.create"
 			responseCreateAt := time.Time{}
@@ -995,6 +999,25 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 						turnLifecycle.cancelResponseCreate()
 					}
 				}()
+			}
+			turnNo := int(completedTurns.Load()) + 1
+			if turnNo < 2 {
+				turnNo = 2
+			}
+			requestModelForThisFrame := usageMeta.requestModelForFrame(auditPayload)
+			if requestModelForThisFrame == "" {
+				requestModelForThisFrame = openAIWSPassthroughRequestModelFromSessionFrame(auditPayload)
+			}
+			if requestModelForThisFrame == "" {
+				requestModelForThisFrame = capturedSessionModel
+			}
+			// Non-response.create frames are still client-controlled data and may
+			// carry prompt content, so every data frame must cross the audit hook
+			// before any normalization or upstream-side effect.
+			if hooks != nil && hooks.BeforeRequest != nil {
+				if err := hooks.BeforeRequest(turnNo, auditPayload, requestModelForThisFrame); err != nil {
+					return payload, nil, err
+				}
 			}
 			responsesLite := isResponseCreate && isOpenAIResponsesLiteWebSocketPayload(payload)
 			if isResponseCreate {
@@ -1039,20 +1062,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				}
 				usageMeta.captureRequestedReasoningEffort(originalResponseCreate)
 			}
-			turnNo := int(completedTurns.Load()) + 1
-			if turnNo < 2 {
-				turnNo = 2
-			}
-			requestModelForThisFrame := ""
 			if isResponseCreate {
-				requestModelForThisFrame = usageMeta.requestModelForFrame(payload)
-				if requestModelForThisFrame == "" {
-					requestModelForThisFrame = capturedSessionModel
-				}
-				if hooks != nil && hooks.BeforeRequest != nil {
-					if err := hooks.BeforeRequest(turnNo, payload, requestModelForThisFrame); err != nil {
-						return payload, nil, err
-					}
+				if mappedModel := usageMeta.requestModelForFrame(payload); mappedModel != "" {
+					requestModelForThisFrame = mappedModel
 				}
 				if hooks != nil && hooks.BeforeTurn != nil {
 					if err := hooks.BeforeTurn(turnNo); err != nil {

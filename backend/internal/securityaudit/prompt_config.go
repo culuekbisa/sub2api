@@ -104,9 +104,11 @@ type ActiveEndpoint struct {
 }
 
 type ActiveConfig struct {
-	RiskControlEnabled     bool
-	Enabled                bool
-	BlockingEnabled        bool
+	RiskControlEnabled bool
+	Enabled            bool
+	BlockingEnabled    bool
+	// BlockingLatestTurnOnly is retained for config round-trip compatibility.
+	// Synchronous Evaluate always scans the latest user text only.
 	BlockingLatestTurnOnly bool
 	StorePassEvents        bool
 	EngineMode             string
