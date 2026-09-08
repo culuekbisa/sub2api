@@ -1,4 +1,4 @@
-name: Port Plus Risk Control
+name: Verify Plus Risk Control
 
 on:
   push:
@@ -8,19 +8,17 @@ on:
       - '.github/workflows/port-plus-risk.yml'
 
 permissions:
-  contents: write
-
-env:
-  PORT_REVISION: '16'
+  contents: read
 
 jobs:
-  port-and-test:
+  test:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+
+      - name: Verify target version
+        run: test "$(tr -d '\r\n' < backend/cmd/server/VERSION)" = '0.2.2'
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -29,14 +27,6 @@ jobs:
           check-latest: false
           cache: true
           cache-dependency-path: backend/go.sum
-
-      - name: Prepare v0.2.2 shared ingress adaptations
-        run: |
-          python3 .github/scripts/prepare-plus-risk-v022.py
-          python3 .github/scripts/prepare-plus-risk-audit-log.py
-
-      - name: Port Plus final risk-control state
-        run: bash .github/scripts/port-plus-risk.sh
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -68,17 +58,3 @@ jobs:
       - name: Focused security-audit tests
         working-directory: backend
         run: go test ./internal/auditcontent/... ./internal/securityaudit/... ./internal/service/... ./internal/repository/... ./internal/handler/... ./internal/server/... -count=1
-
-      - name: Commit tested port to branch
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          test "$(tr -d '\r\n' < backend/cmd/server/VERSION)" = '0.2.2'
-          git rm .github/workflows/port-plus-risk.yml .github/scripts/port-plus-risk.sh .github/scripts/prepare-plus-risk-v022.py .github/scripts/prepare-plus-risk-audit-log.py
-          git add -A
-          if git diff --cached --quiet; then
-            echo '::error::No integration changes produced'
-            exit 1
-          fi
-          git commit -m 'feat(risk): port Plus security audit to v0.2.2'
-          git push origin HEAD:feat/plus-risk-audit-v0.2.2
