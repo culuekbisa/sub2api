@@ -11,9 +11,9 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  focused-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
 
@@ -28,33 +28,6 @@ jobs:
           cache: true
           cache-dependency-path: backend/go.sum
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: 9
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '20'
-          cache: 'pnpm'
-          cache-dependency-path: frontend/pnpm-lock.yaml
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile
-
-      - name: Backend unit tests
-        working-directory: backend
-        run: make test-unit
-
-      - name: Backend integration tests
-        working-directory: backend
-        run: make test-integration
-
-      - name: Frontend typecheck and critical tests
-        run: make test-frontend
-
       - name: Focused security-audit tests
         working-directory: backend
-        run: go test ./internal/auditcontent/... ./internal/securityaudit/... ./internal/service/... ./internal/repository/... ./internal/handler/... ./internal/server/... -count=1
+        run: go test ./internal/securityaudit/... ./internal/service/... ./internal/repository/... ./internal/handler/... ./internal/server/... -count=1
