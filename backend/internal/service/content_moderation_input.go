@@ -16,7 +16,21 @@ func ExtractContentModerationInput(protocol string, body []byte) ContentModerati
 	return input
 }
 
+// extractContentModerationKeywordText mirrors the semantic scan: inbound
+// <system-reminder> markup is not a trust boundary, so the local keyword
+// matcher inspects the same current direct-user text. It skips the rune
+// budget on purpose: a client-supplied reminder block must never be able to
+// push a blocked keyword past the truncation point and hide it.
+func extractContentModerationKeywordText(protocol string, body []byte) string {
+	input, _, _, _ := extractContentModerationInputWithBudget(protocol, body, false)
+	return input.Text
+}
+
 func extractContentModerationInput(protocol string, body []byte) (ContentModerationInput, bool, []auditcontent.IncompleteReason, error) {
+	return extractContentModerationInputWithBudget(protocol, body, true)
+}
+
+func extractContentModerationInputWithBudget(protocol string, body []byte, applyRuneBudget bool) (ContentModerationInput, bool, []auditcontent.IncompleteReason, error) {
 	document, err := auditcontent.Extract(protocol, body)
 	if err != nil {
 		return ContentModerationInput{}, false, nil, err
@@ -41,7 +55,11 @@ func extractContentModerationInput(protocol string, body []byte) (ContentModerat
 		Text:   normalizeContentModerationText(strings.Join(parts, "\n")),
 		Images: normalizeModerationImages(images),
 	}
-	out.Normalize()
+	if applyRuneBudget {
+		out.Normalize()
+	} else {
+		out.Images = normalizeModerationImages(out.Images)
+	}
 	if document.Incomplete {
 		return out, true, auditcontent.SanitizeIncompleteReasons(document.IncompleteReasons), nil
 	}
