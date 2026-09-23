@@ -19,6 +19,7 @@ on:
 permissions:
   contents: write
   actions: write
+  issues: write
 
 concurrency:
   group: upstream-sync
@@ -28,13 +29,35 @@ jobs:
   sync:
     if: github.repository == 'culuekbisa/sub2api'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    outputs:
+      merge_state: ${{ steps.merge.outputs.merge_state }}
+      unresolved: ${{ steps.merge.outputs.unresolved }}
     steps:
       - name: Checkout fork
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: main
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache-dependency-path: backend/go.sum
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
 
       - name: Merge upstream/main
         id: merge
@@ -83,22 +106,52 @@ jobs:
           merge_status=$?
           set -e
           if [ "$merge_status" -ne 0 ]; then
-            echo '::error title=Upstream merge conflict::upstream/main conflicts with the fork main branch'
-            conflict_files="$(git diff --name-only --diff-filter=U)"
-            if [ -z "$conflict_files" ]; then
-              conflict_files='Git reported a merge failure without unmerged paths; inspect the step log.'
+            # Additive settings conflicts are union-resolved by the checker; the
+            # remaining files are left conflicted for a human. The resolver never
+            # decides on the fork's risk-control files.
+            python .github/sync-tools/resolve_settings_conflicts.py --root . || true
+
+            unresolved="$(git diff --name-only --diff-filter=U | paste -sd, -)"
+            echo "unresolved=$unresolved" >> "$GITHUB_OUTPUT"
+
+            if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+              echo 'merge_state=conflict' >> "$GITHUB_OUTPUT"
+              git merge --abort || true
+              exit 0
             fi
-            {
-              echo '### Upstream merge conflict'
-              echo
-              echo 'Automatic sync stopped without pushing. Resolve these paths locally, commit the result, and push `main`.'
-              echo
-              echo '```text'
-              printf '%s\n' "$conflict_files"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            git merge --abort || true
-            exit 1
+
+            # The union is a textual guess, so it only counts as resolved when
+            # the affected toolchain accepts it. Each gate runs only for trees
+            # the merge actually touched: an unrelated toolchain failure (for
+            # example a flaky pnpm install) must not reject a good Go-only merge.
+            merged_paths="$(git diff --cached --name-only)"
+
+            verified=true
+            if printf '%s\n' "$merged_paths" | grep -q '^backend/'; then
+              if (cd backend && go build ./...) >/dev/null 2>&1; then
+                echo 'go build: ok'
+              else
+                echo 'go build: failed'
+                verified=false
+              fi
+            fi
+
+            if [ "$verified" = 'true' ] && printf '%s\n' "$merged_paths" | grep -q '^frontend/'; then
+              if (cd frontend && pnpm install --frozen-lockfile >/dev/null 2>&1 && pnpm run typecheck >/dev/null 2>&1); then
+                echo 'vue-tsc: ok'
+              else
+                echo 'vue-tsc: failed'
+                verified=false
+              fi
+            fi
+
+            if [ "$verified" = 'true' ]; then
+              echo 'merge_state=auto' >> "$GITHUB_OUTPUT"
+            else
+              echo 'merge_state=conflict' >> "$GITHUB_OUTPUT"
+              git merge --abort || true
+              exit 0
+            fi
           fi
 
           git commit -m 'chore(sync): merge upstream/main'
@@ -117,6 +170,42 @@ jobs:
               echo "Upstream changes were merged, but \`VERSION\` remains \`$UPSTREAM_VERSION\`."
               echo 'No fork tag or Release was created.'
             } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Report unresolved sync conflict
+        if: steps.merge.outputs.merge_state == 'conflict'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UNRESOLVED: ${{ steps.merge.outputs.unresolved }}
+          UPSTREAM_VERSION: ${{ steps.merge.outputs.upstream_version }}
+        run: |
+          set -Eeuo pipefail
+          title='Upstream sync needs a manual merge'
+          files="${UNRESOLVED:-(not reported)}"
+          bullet_list="$(printf '%s' "$UNRESOLVED" | tr ',' '\n' | sed 's/^/- `/; s/$/`/')"
+          {
+            echo '### Upstream sync needs a manual merge'
+            echo
+            echo "upstream/main advances to VERSION \`${UPSTREAM_VERSION:-unknown}\` and conflicts with fork \`main\`."
+            echo
+            echo 'The additive settings files were union-resolved and verified by a build; these files still need a human:'
+            echo
+            echo "$bullet_list"
+            echo
+            echo "The merge was aborted, so \`main\` is untouched. See the [run log]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # One open issue is refreshed instead of opening a new one, so the
+          # 15-minute schedule cannot turn a conflict into tracker spam.
+          number="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search 'Upstream sync needs a manual merge in:title' --json number,title --jq '[.[] | select(.title == "'"$title"'")][0].number // empty')"
+          body="$(printf 'Conflicting paths:\n\n%s\n\nMerge upstream/main into main, keep the fork risk-control behaviour, then push.\nThis issue is refreshed by every scheduled run until the merge lands.\n\nRun: %s/%s/actions/runs/%s\n' "$files" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "$body" >/dev/null
+            echo "refreshed issue #$number"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" --label bug >/dev/null
+            echo 'opened a new conflict issue'
           fi
 
       - name: Create fork release tag
