@@ -337,6 +337,18 @@ func extractAnthropic(document *Document, root map[string]any) {
 	if len(messages) == 0 {
 		return
 	}
+	// Anthropic requests may append a trailing system message after the user turn.
+	// It carries request metadata rather than a new model/tool turn, so the current
+	// turn stays on the latest non-system message while agent/tool loops still end
+	// up without current user content.
+	currentIndex := len(messages) - 1
+	for currentIndex >= 0 {
+		message, ok := messages[currentIndex].(map[string]any)
+		if !ok || normalizedRole(message["role"]) != "system" {
+			break
+		}
+		currentIndex--
+	}
 	for index, item := range messages {
 		pop := withIncompletePath(document, fmt.Sprintf("messages[%d]", index))
 		message, ok := item.(map[string]any)
@@ -351,7 +363,7 @@ func extractAnthropic(document *Document, root map[string]any) {
 		if content, exists := message["content"]; exists {
 			markContentBearing(document, content)
 		}
-		appendAnthropicContent(document, message["content"], role, index == len(messages)-1)
+		appendAnthropicContent(document, message["content"], role, index == currentIndex)
 		markUnknownNonEmptyFields(document, message, "role", "content")
 		pop()
 	}

@@ -46,8 +46,8 @@ ON CONFLICT (block_key) DO UPDATE SET
 RETURNING id, created_at, expires_at`,
 		block.BlockKey,
 		block.SessionID,
-		nullableInt64Ptr(block.UserID),
-		nullableInt64Ptr(block.APIKeyID),
+		nullableInt64Value(block.UserID),
+		nullableInt64Value(block.APIKeyID),
 		block.RequestID,
 		block.Endpoint,
 		block.Protocol,
@@ -223,7 +223,10 @@ func (r *contentModerationRepository) DeleteExpiredSessionBlocks(ctx context.Con
 	return deleted, nil
 }
 
-func nullableInt64Ptr(value *int64) any {
+// nullableInt64Value renders an optional foreign key for SQL arguments. The
+// affiliate repo owns nullableInt64Ptr for sql.NullInt64, so this package keeps
+// a pointer-typed variant under its own name.
+func nullableInt64Value(value *int64) any {
 	if value == nil {
 		return nil
 	}
