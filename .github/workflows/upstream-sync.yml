@@ -196,17 +196,34 @@ jobs:
             echo "The merge was aborted, so \`main\` is untouched. See the [run log]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # One open issue is refreshed instead of opening a new one, so the
-          # 15-minute schedule cannot turn a conflict into tracker spam.
-          number="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search 'Upstream sync needs a manual merge in:title' --json number,title --jq '[.[] | select(.title == "'"$title"'")][0].number // empty')"
           body="$(printf 'Conflicting paths:\n\n%s\n\nMerge upstream/main into main, keep the fork risk-control behaviour, then push.\nThis issue is refreshed by every scheduled run until the merge lands.\n\nRun: %s/%s/actions/runs/%s\n' "$files" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
-          if [ -n "$number" ]; then
-            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "$body" >/dev/null
-            echo "refreshed issue #$number"
+          # One open issue is refreshed instead of opening a new one, so the
+          # 15-minute schedule cannot turn a conflict into tracker spam. Issues
+          # are disabled on this fork, so every issue call below is best-effort:
+          # the summary above and the deliberate failure at the end of this step
+          # are the real signal.
+          if ! issue_json="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search 'Upstream sync needs a manual merge in:title' --json number,title 2>&1)"; then
+            echo "::warning::Cannot query issues; see the job summary above. $issue_json"
           else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" --label bug >/dev/null
-            echo 'opened a new conflict issue'
+            number="$(printf '%s' "$issue_json" | jq -r --arg t "$title" '[.[] | select(.title == $t)][0].number // empty')"
+            if [ -n "$number" ]; then
+              if ! gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "$body" >/dev/null 2>&1; then
+                echo "::warning::Cannot comment on issue #$number; see the job summary above."
+              else
+                echo "refreshed issue #$number"
+              fi
+            elif ! gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" --label bug >/dev/null 2>&1; then
+              echo "::warning::Cannot open a conflict issue; see the job summary above."
+            else
+              echo 'opened a new conflict issue'
+            fi
           fi
+
+          # Fail on purpose: a red run is how a human notices that upstream
+          # advanced and needs a manual merge. The annotation keeps the reason
+          # legible even when the issue tracker cannot be used.
+          echo "::error::Upstream $UPSTREAM_VERSION conflicts with fork main in $files; main is untouched"
+          exit 1
 
       - name: Create fork release tag
         id: bump
