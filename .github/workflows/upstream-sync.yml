@@ -101,6 +101,37 @@ jobs:
             VERSION_CHANGED=true
           fi
 
+          # Migration safety gate. Migrations are embedded in the binary and
+          # applied at startup, so an auto-merge that rewrites or deletes an
+          # already-applied migration changes its checksum and makes the next
+          # boot fail on every deployment. Additive migrations are safe to take
+          # automatically; anything else is a human decision.
+          MIGRATION_CHANGES="$(git diff --name-status "${MERGE_BASE}" upstream/main -- backend/migrations)"
+          MIGRATION_REVIEW="$(printf '%s\n' "${MIGRATION_CHANGES}" | grep -E '^(M|D|R|C|T)' || true)"
+          MIGRATION_ADDED="$(printf '%s\n' "${MIGRATION_CHANGES}" | grep -E '^A' | awk '{print $2}' | paste -sd, -)"
+          echo "migration_added=${MIGRATION_ADDED}"
+
+          if [ -n "${MIGRATION_REVIEW}" ]; then
+            echo '::error::Upstream rewrote or removed an existing migration; manual review required'
+            printf '%s\n' "${MIGRATION_REVIEW}"
+            {
+              echo '### Upstream sync needs a manual migration review'
+              echo
+              echo "upstream/main advances to VERSION \`${UPSTREAM_VERSION}\` and touches migrations that already shipped."
+              echo
+              echo "Applied migrations are checksum-verified at boot, so merging these automatically can make every deployment fail to start:"
+              echo
+              printf '%s\n' "${MIGRATION_REVIEW}" | awk '{print "- `" $2 "` (" $1 ")"}'
+              echo
+              echo "Rebase the fork's \`main\` onto upstream manually, reconcile the migration bodies (and any checksum-compatibility rule in \`backend/internal/repository/migrations_runner.go\`), then push."
+              echo
+              echo "The merge was aborted, so \`main\` is untouched. See the [run log]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "migration_review=$(printf '%s\n' "${MIGRATION_REVIEW}" | awk '{print $2}' | paste -sd, -)" >> "$GITHUB_OUTPUT"
+            echo 'merge_state=migration' >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
           set +e
           git merge --no-commit --no-ff upstream/main
           merge_status=$?

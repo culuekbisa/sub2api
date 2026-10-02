@@ -111,7 +111,8 @@ func promptSegmentsFromAuditContent(document auditcontent.Document, protocol str
 		if role == "" && ((segment.Source == auditcontent.SourceMessage && allowRolelessMessage) ||
 			segment.Source == auditcontent.SourceSearchQuery ||
 			segment.Source == auditcontent.SourceEmbeddingInput ||
-			segment.Source == auditcontent.SourceMediaPrompt) {
+			segment.Source == auditcontent.SourceMediaPrompt ||
+			segment.Source == auditcontent.SourceSystemOneInput) {
 			user = true
 			role = "user"
 		}
@@ -126,7 +127,9 @@ func promptSegmentsFromAuditContent(document auditcontent.Document, protocol str
 			}
 		}
 		segText := segment.Text
-		if user {
+		// System One texts are data, not chat: a literal <system-reminder> is
+		// client content that Jev receives, so it must not be stripped.
+		if user && segment.Source != auditcontent.SourceSystemOneInput {
 			segText = stripPromptAuditClientWrapperBlocks(segText)
 			if segText == "" {
 				continue
@@ -146,7 +149,10 @@ func isPromptAuditClientControlledSegment(segment auditcontent.Segment, allowRol
 	case auditcontent.SourceSearchQuery, auditcontent.SourceEmbeddingInput, auditcontent.SourceMediaPrompt,
 		auditcontent.SourceInstruction, auditcontent.SourcePromptVariable,
 		auditcontent.SourceToolCall, auditcontent.SourceToolDefinition, auditcontent.SourceToolOutput,
-		auditcontent.SourceReasoning:
+		auditcontent.SourceReasoning,
+		// System One carries no client-harness reminder blocks, so a literal
+		// <system-reminder> is ordinary user text and must never be skipped.
+		auditcontent.SourceSystemOneInput:
 		return true
 	case auditcontent.SourceMessage:
 		role := strings.ToLower(strings.TrimSpace(segment.Role))

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/openaiwire"
+	"github.com/tidwall/gjson"
 )
 
 const maxIncompleteReasons = 8
@@ -46,6 +47,7 @@ const (
 	SourceMediaPrompt    Source = "media_prompt"
 	SourcePromptVariable Source = "prompt_variable"
 	SourceReasoning      Source = "reasoning"
+	SourceSystemOneInput Source = "systemone_input"
 )
 
 type Segment struct {
@@ -119,6 +121,8 @@ func Extract(protocol string, body []byte) (Document, error) {
 		extractEmbeddings(&document, root)
 	case "openai_images", "grok_media", "media", "images":
 		extractMediaPrompts(&document, root)
+	case "typesafe_systemone", "typesafe_system_one", "systemone":
+		extractSystemOne(&document, body)
 	default:
 		extractDefault(&document, root)
 	}
@@ -1472,7 +1476,82 @@ func extractMediaPrompts(document *Document, root map[string]any) {
 	walk(root, "")
 }
 
+// extractSystemOne 处理 TypeSafe (Jev System One) 请求。该协议没有对话结构：
+// Jev 会读取整个 JSON，因此客户端可控的每个字符串（对象键名、题目 id、题目
+// 扩展字段名与取值、顶层扩展字段、state）都要作为当前请求的用户文本审核。
+// type 字段由 System One 校验枚举，不属于客户端文本，故跳过。遍历保持文档顺序，
+// 保证同一请求的审核文本与 prompt 哈希稳定。
+func extractSystemOne(document *Document, body []byte) {
+	if document == nil || len(body) == 0 {
+		return
+	}
+	root := gjson.ParseBytes(body)
+	questions := root.Get("questions")
+	if !questions.IsObject() {
+		collectSystemOneText(document, questions)
+	}
+	questions.ForEach(func(id, question gjson.Result) bool {
+		appendSystemOneText(document, id.String())
+		if !question.IsObject() {
+			collectSystemOneText(document, question)
+			return true
+		}
+		question.ForEach(func(field, value gjson.Result) bool {
+			switch field.String() {
+			case "type":
+				return true
+			case "instructions", "criteria":
+			default:
+				appendSystemOneText(document, field.String())
+			}
+			collectSystemOneText(document, value)
+			return true
+		})
+		return true
+	})
+	root.ForEach(func(field, value gjson.Result) bool {
+		switch field.String() {
+		case "model", "stream", "state", "questions":
+			return true
+		}
+		appendSystemOneText(document, field.String())
+		collectSystemOneText(document, value)
+		return true
+	})
+	collectSystemOneText(document, root.Get("state"))
+}
+
+func collectSystemOneText(document *Document, value gjson.Result) {
+	switch {
+	case !value.Exists():
+		return
+	case value.Type == gjson.String:
+		appendSystemOneText(document, value.String())
+	case value.IsArray():
+		value.ForEach(func(_, child gjson.Result) bool {
+			collectSystemOneText(document, child)
+			return true
+		})
+	case value.IsObject():
+		value.ForEach(func(key, child gjson.Result) bool {
+			appendSystemOneText(document, key.String())
+			collectSystemOneText(document, child)
+			return true
+		})
+	}
+}
+
+func appendSystemOneText(document *Document, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	document.ContentBearing = true
+	appendText(document, text, "user", SourceSystemOneInput, true, true)
+}
+
 func appendToolDefinitions(document *Document, value any) {
+
 	if !hasNonEmptyValue(value) {
 		return
 	}

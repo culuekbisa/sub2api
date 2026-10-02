@@ -71,7 +71,10 @@ func isModerationDirectUser(protocol, role string, source auditcontent.Source, c
 		return false
 	}
 	switch source {
-	case auditcontent.SourceMessage, auditcontent.SourceSearchQuery, auditcontent.SourceEmbeddingInput, auditcontent.SourceMediaPrompt:
+	case auditcontent.SourceMessage, auditcontent.SourceSearchQuery, auditcontent.SourceEmbeddingInput, auditcontent.SourceMediaPrompt,
+		// System One has no conversation roles; every client-controlled text is
+		// current user input and must be moderated.
+		auditcontent.SourceSystemOneInput:
 	default:
 		return false
 	}

@@ -678,7 +678,45 @@ func segmentTexts(segments []Segment) []string {
 	return result
 }
 
+// TypeSafe (Jev System One) has no conversation structure: every client text -
+// question ids, extension field names, unknown top-level fields and the
+// evaluated state - must reach moderation, while the validated `type` enum and
+// canonical protocol fields must not.
+func TestExtractTypeSafeSystemOneClientText(t *testing.T) {
+	body := `{"model":"jev-latest","stream":false,"state":{"STATE_KEY":"STATE_TITLE"},` +
+		`"questions":{"q1":{"type":"noul","instructions":"JUDGE_THIS","criteria":{"OPTION":"DESC"},"EXT":"EXT_VALUE"}},` +
+		`"TOP_EXT":"TOP_VALUE"}`
+	document, err := Extract("typesafe_systemone", []byte(body))
+	require.NoError(t, err)
+	require.True(t, document.ContentBearing)
+
+	texts := make([]string, 0, len(document.Segments))
+	for _, segment := range document.Segments {
+		require.Equal(t, SourceSystemOneInput, segment.Source)
+		require.Equal(t, "user", segment.Role)
+		require.True(t, segment.Current)
+		require.True(t, segment.ClientControlled)
+		texts = append(texts, segment.Text)
+	}
+	for _, want := range []string{"q1", "JUDGE_THIS", "OPTION", "DESC", "EXT", "EXT_VALUE", "TOP_EXT", "TOP_VALUE", "STATE_KEY", "STATE_TITLE"} {
+		require.Contains(t, texts, want)
+	}
+	// Canonical protocol fields and the validated enum are not client text.
+	for _, unwanted := range []string{"jev-latest", "model", "stream", "questions", "type", "noul", "instructions", "criteria", "state"} {
+		require.NotContains(t, texts, unwanted)
+	}
+}
+
+func TestExtractTypeSafeSystemOneKeepsReminderText(t *testing.T) {
+	body := `{"state":"<system-reminder>hidden payload</system-reminder>"}`
+	document, err := Extract("typesafe_systemone", []byte(body))
+	require.NoError(t, err)
+	require.Len(t, document.Segments, 1)
+	require.Contains(t, document.Segments[0].Text, "hidden payload")
+}
+
 func segmentSources(segments []Segment) []Source {
+
 	result := make([]Source, 0, len(segments))
 	for _, segment := range segments {
 		result = append(result, segment.Source)
