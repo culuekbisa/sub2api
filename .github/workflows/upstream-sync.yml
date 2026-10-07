@@ -106,9 +106,11 @@ jobs:
           # already-applied migration changes its checksum and makes the next
           # boot fail on every deployment. Additive migrations are safe to take
           # automatically; anything else is a human decision.
-          MIGRATION_CHANGES="$(git diff --name-status "${MERGE_BASE}" upstream/main -- backend/migrations)"
+          MIGRATION_CHANGES="$(git diff --name-status "${MERGE_BASE}" upstream/main -- backend/migrations || true)"
+          # grep exits 1 on no match, which set -e would treat as failure, so every
+          # pipeline that may legitimately match nothing is guarded.
           MIGRATION_REVIEW="$(printf '%s\n' "${MIGRATION_CHANGES}" | grep -E '^(M|D|R|C|T)' || true)"
-          MIGRATION_ADDED="$(printf '%s\n' "${MIGRATION_CHANGES}" | grep -E '^A' | awk '{print $2}' | paste -sd, -)"
+          MIGRATION_ADDED="$(printf '%s\n' "${MIGRATION_CHANGES}" | grep -E '^A' | awk '{print $2}' | paste -sd, - || true)"
           echo "migration_added=${MIGRATION_ADDED}"
 
           if [ -n "${MIGRATION_REVIEW}" ]; then
