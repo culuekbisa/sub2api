@@ -7,8 +7,9 @@ on:
     paths:
       - '.github/workflows/upstream-sync.yml'
   schedule:
-    # Multiple staggered checks reduce the chance of a dropped scheduled event.
-    - cron: '7,22,37,52 * * * *'
+    # Once a day at 03:17 UTC (11:17 Asia/Shanghai). The fork's Actions budget was
+    # throttled while this ran every 15 minutes, so keep the cadence low.
+    - cron: '17 3 * * *'
   workflow_dispatch:
     inputs:
       release_tag:
