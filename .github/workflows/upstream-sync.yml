@@ -35,11 +35,15 @@ jobs:
       merge_state: ${{ steps.merge.outputs.merge_state }}
       unresolved: ${{ steps.merge.outputs.unresolved }}
     steps:
+      # fork 的 GITHUB_TOKEN 没有 workflows 权限，上游一旦改 .github/workflows/*.yml
+      # 就会被 "refusing to allow a GitHub App to create or update workflow" 拒绝推送，
+      # 因此用带 workflow 权限的 PAT（仓库 secret SYNC_TOKEN）执行 checkout 与 push。
       - name: Checkout fork
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: main
+          token: ${{ secrets.SYNC_TOKEN }}
 
       - name: Set up Go
         uses: actions/setup-go@v6
