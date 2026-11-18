@@ -88,6 +88,8 @@ jobs:
           UPSTREAM_VERSION="${UPSTREAM_VERSION#v}"
           echo "previous_upstream_version=$PREVIOUS_VERSION"
           echo "upstream_version=$UPSTREAM_VERSION"
+          echo "previous_upstream_version=$PREVIOUS_VERSION" >> "$GITHUB_OUTPUT"
+          echo "upstream_version=$UPSTREAM_VERSION" >> "$GITHUB_OUTPUT"
 
           if [ "$PREVIOUS_VERSION" = "$UPSTREAM_VERSION" ]; then
             VERSION_CHANGED=false
