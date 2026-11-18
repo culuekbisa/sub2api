@@ -45,25 +45,8 @@ jobs:
           ref: main
           token: ${{ secrets.SYNC_TOKEN }}
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: backend/go.mod
-          check-latest: false
-          cache-dependency-path: backend/go.sum
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: 9
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: 'pnpm'
-          cache-dependency-path: frontend/pnpm-lock.yaml
-
+      # 合并本身不需要 Go/Node。needs_verify 由本步骤算出，工具链按需安装，
+      # 使「上游没动」和「上游只动文档/CI」的日常同步不产生任何构建开销。
       - name: Merge upstream/main
         id: merge
         shell: bash
@@ -76,8 +59,14 @@ jobs:
           git fetch --prune upstream main
           git checkout -B main origin/main
 
+          # 先按「不需要验证」的保守默认值填好所有输出，后续再按需改写。
+          echo "needs_verify=false" >> "$GITHUB_OUTPUT"
+          echo "touches_backend=false" >> "$GITHUB_OUTPUT"
+          echo "touches_frontend=false" >> "$GITHUB_OUTPUT"
+
           if git merge-base --is-ancestor upstream/main HEAD; then
             echo 'upstream/main is already contained in origin/main'
+            echo "merge_state=up-to-date" >> "$GITHUB_OUTPUT"
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
             echo "version_changed=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -143,6 +132,8 @@ jobs:
           git merge --no-commit --no-ff upstream/main
           merge_status=$?
           set -e
+
+          resolver_used=false
           if [ "$merge_status" -ne 0 ]; then
             # Additive settings conflicts are union-resolved by the checker; the
             # remaining files are left conflicted for a human. The resolver never
@@ -157,56 +148,141 @@ jobs:
               git merge --abort || true
               exit 0
             fi
-
-            # The union is a textual guess, so it only counts as resolved when
-            # the affected toolchain accepts it. Each gate runs only for trees
-            # the merge actually touched: an unrelated toolchain failure (for
-            # example a flaky pnpm install) must not reject a good Go-only merge.
-            merged_paths="$(git diff --cached --name-only)"
-
-            verified=true
-            if printf '%s\n' "$merged_paths" | grep -q '^backend/'; then
-              if (cd backend && go build ./...) >/dev/null 2>&1; then
-                echo 'go build: ok'
-              else
-                echo 'go build: failed'
-                verified=false
-              fi
-            fi
-
-            if [ "$verified" = 'true' ] && printf '%s\n' "$merged_paths" | grep -q '^frontend/'; then
-              if (cd frontend && pnpm install --frozen-lockfile >/dev/null 2>&1 && pnpm run typecheck >/dev/null 2>&1); then
-                echo 'vue-tsc: ok'
-              else
-                echo 'vue-tsc: failed'
-                verified=false
-              fi
-            fi
-
-            if [ "$verified" = 'true' ]; then
-              echo 'merge_state=auto' >> "$GITHUB_OUTPUT"
-            else
-              echo 'merge_state=conflict' >> "$GITHUB_OUTPUT"
-              git merge --abort || true
-              exit 0
-            fi
+            # 并集解析是文本猜测，必须由编译/类型检查确认后才能提交。
+            resolver_used=true
           fi
 
-          git commit -m 'chore(sync): merge upstream/main'
-          git push origin HEAD:main
+          # 记录这次合并实际落在哪些工具链目录，供按需安装与验证使用。
+          merged_paths="$(git diff --cached --name-only)"
+          touches_backend=false
+          touches_frontend=false
+          if printf '%s\n' "$merged_paths" | grep -q '^backend/'; then touches_backend=true; fi
+          if printf '%s\n' "$merged_paths" | grep -q '^frontend/'; then touches_frontend=true; fi
+          echo "touches_backend=$touches_backend" >> "$GITHUB_OUTPUT"
+          echo "touches_frontend=$touches_frontend" >> "$GITHUB_OUTPUT"
+
+          # 只有两种情况必须过工具链：
+          #   1. 上游 VERSION 变了 —— 这次合并要出 Release，产物必须能构建；
+          #   2. 走了并集解析 —— 文本并集只是猜测，必须由编译/类型检查确认。
+          # 其余情况（无冲突的日常合并）只做 merge + push，把 fork 仅剩的
+          # Actions 预算留给真正需要构建的合并。
+          if [ "$VERSION_CHANGED" = 'true' ] || [ "$resolver_used" = 'true' ]; then
+            needs_verify=true
+          else
+            needs_verify=false
+          fi
+          echo "needs_verify=$needs_verify" >> "$GITHUB_OUTPUT"
+          echo "merge_state=ready" >> "$GITHUB_OUTPUT"
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
           echo "version_changed=$VERSION_CHANGED" >> "$GITHUB_OUTPUT"
-          echo "upstream_version=$UPSTREAM_VERSION" >> "$GITHUB_OUTPUT"
+          echo "plan: needs_verify=$needs_verify version_changed=$VERSION_CHANGED resolver_used=$resolver_used backend=$touches_backend frontend=$touches_frontend"
+
+      - name: Set up Go
+        if: steps.merge.outputs.needs_verify == 'true' && steps.merge.outputs.touches_backend == 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          check-latest: false
+          cache-dependency-path: backend/go.sum
+
+      - name: Set up pnpm
+        if: steps.merge.outputs.needs_verify == 'true' && steps.merge.outputs.touches_frontend == 'true'
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        if: steps.merge.outputs.needs_verify == 'true' && steps.merge.outputs.touches_frontend == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      # 每个 gate 只对这次合并真正触碰的工具链运行：前后端互不牵连，
+      # 一个无关的 pnpm 抖动不会否掉一次干净的 Go-only 合并。
+      - name: Verify merged tree
+        if: steps.merge.outputs.merge_state == 'ready' && steps.merge.outputs.needs_verify == 'true'
+        shell: bash
+        env:
+          TOUCHES_BACKEND: ${{ steps.merge.outputs.touches_backend }}
+          TOUCHES_FRONTEND: ${{ steps.merge.outputs.touches_frontend }}
+          UPSTREAM_VERSION: ${{ steps.merge.outputs.upstream_version }}
+        run: |
+          set -Eeuo pipefail
+          failed=''
+          go_result='not run'
+          vue_result='not run'
+          if [ "$TOUCHES_BACKEND" = 'true' ]; then
+            if (cd backend && go build ./...) >/dev/null 2>&1; then
+              echo 'go build: ok'
+              go_result='ok'
+            else
+              echo 'go build: failed'
+              go_result='failed'
+              failed='backend'
+            fi
+          fi
+          if [ -z "$failed" ] && [ "$TOUCHES_FRONTEND" = 'true' ]; then
+            if (cd frontend && pnpm install --frozen-lockfile >/dev/null 2>&1 && pnpm run typecheck >/dev/null 2>&1); then
+              echo 'vue-tsc: ok'
+              vue_result='ok'
+            else
+              echo 'vue-tsc: failed'
+              vue_result='failed'
+              failed='frontend'
+            fi
+          fi
+          if [ -n "$failed" ]; then
+            # 验证失败时不提交：main 保持不动，交给人工合并。这里直接写摘要，
+            # 因为 merge_state 是 ready，下面的 conflict 报告步骤不会触发。
+            {
+              echo "### Upstream merge failed $failed verification"
+              echo
+              echo "upstream/main advances to VERSION \`$UPSTREAM_VERSION\` and merged without"
+              echo 'text conflicts, but the merged tree does not build.'
+              echo
+              echo "- \`go build ./...\`: $go_result"
+              echo "- \`pnpm run typecheck\`: $vue_result"
+              echo
+              echo "The merge was aborted, so \`main\` is untouched. See the [run log]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort || true
+            echo "::error::Merged tree failed $failed verification; main is untouched"
+            exit 1
+          fi
+
+      - name: Commit and push merge
+        if: steps.merge.outputs.merge_state == 'ready'
+        shell: bash
+        env:
+          NEEDS_VERIFY: ${{ steps.merge.outputs.needs_verify }}
+          VERSION_CHANGED: ${{ steps.merge.outputs.version_changed }}
+          UPSTREAM_VERSION: ${{ steps.merge.outputs.upstream_version }}
+        run: |
+          set -Eeuo pipefail
+          if [ "$NEEDS_VERIFY" = 'true' ]; then
+            git commit -m 'chore(sync): merge upstream/main'
+          else
+            git commit -m 'chore(sync): merge upstream/main [no verify]'
+          fi
+          git push origin HEAD:main
 
           if [ "$VERSION_CHANGED" = 'true' ]; then
-            echo "Upstream VERSION changed: $PREVIOUS_VERSION -> $UPSTREAM_VERSION"
+            echo "Upstream VERSION changed: $UPSTREAM_VERSION"
           else
             echo "Upstream synced; VERSION unchanged at $UPSTREAM_VERSION, so no fork tag will be created"
             {
               echo '### Upstream synced without release'
               echo
-              echo "Upstream changes were merged, but \`VERSION\` remains \`$UPSTREAM_VERSION\`."
+              echo "Upstream changes were merged, but \`VERSION\` remains \`${UPSTREAM_VERSION}\`."
               echo 'No fork tag or Release was created.'
+              if [ "$NEEDS_VERIFY" != 'true' ]; then
+                echo
+                echo 'No toolchain ran for this merge: VERSION was unchanged and no'
+                echo 'settings union had to be resolved, so there was nothing to'
+                echo 'rebuild. See the step log for the merge plan.'
+              fi
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
